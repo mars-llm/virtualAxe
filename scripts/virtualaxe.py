@@ -1059,7 +1059,7 @@ def ensure_matching_build(
 
 
 def command_doctor(args: argparse.Namespace) -> int:
-    sources = load_sources()
+    sources = source_registry().as_legacy_payload(include_aliases=False)
     payload: dict[str, Any] = {"sources": {}, "profiles": sorted(p.stem for p in PROFILES_DIR.glob("*.json"))}
     for name, entry in sources["sources"].items():
         try:

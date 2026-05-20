@@ -1191,6 +1191,43 @@ def test_virtualaxe_patch_check_metadata_supports_nerdnos_submit_replay_series()
     assert metadata[5]["patch"] == "0006-nerdnos-brand-virtualaxe-header.patch"
 
 
+def test_virtualaxe_doctor_reports_canonical_sources_only(monkeypatch: pytest.MonkeyPatch, capsys):
+    module = load_virtualaxe_module()
+
+    class Registry:
+        def as_legacy_payload(self, *, include_aliases: bool = True):
+            assert include_aliases is False
+            return {
+                "sources": {
+                    "bitaxe": {"ref": "bitaxe-pin"},
+                    "nerdnos": {"ref": "nerdnos-pin"},
+                }
+            }
+
+    monkeypatch.setattr(module, "source_registry", lambda: Registry())
+    monkeypatch.setattr(module, "ensure_git_source", lambda name, entry, **_kwargs: (Path(f"/tmp/{name}"), entry))
+    monkeypatch.setattr(
+        module,
+        "source_probe",
+        lambda _source_dir: {
+            "capabilities": {"supportsGammaProfiles": False},
+            "missingRequiredCapabilities": [],
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, "tool version\n", ""),
+    )
+
+    args = type("Args", (), {"json": True})()
+
+    assert module.command_doctor(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert set(payload["sources"]) == {"bitaxe", "nerdnos"}
+
+
 def test_virtualaxe_patch_check_applies_resolved_upstream_commit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys):
     module = load_virtualaxe_module()
     source_dir = tmp_path / "source"

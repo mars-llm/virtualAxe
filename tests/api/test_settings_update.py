@@ -10,6 +10,12 @@ BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:18080")
 SOURCE_NAME = os.environ.get("SOURCE_NAME", "bitaxe")
 
 
+def require_explicit_settings_api():
+    if not os.environ.get("BASE_URL"):
+        pytest.skip("set BASE_URL to run mutating API settings checks")
+    require_virtualaxe_api(BASE_URL)
+
+
 def require_bitaxe_settings_api():
     if SOURCE_NAME != "bitaxe":
         pytest.skip(f"{SOURCE_NAME} exposes a source-specific settings API")
@@ -37,7 +43,7 @@ def setting_matches(actual: object, expected: object) -> bool:
 
 
 def test_system_settings_patch_roundtrip():
-    require_virtualaxe_api(BASE_URL, env_vars=("BASE_URL",))
+    require_explicit_settings_api()
     require_bitaxe_settings_api()
 
     system_info = get_json(f"{BASE_URL}/api/system/info", timeout=10)
@@ -66,7 +72,7 @@ def test_system_settings_patch_roundtrip():
 
 
 def test_system_settings_patch_accepts_large_form_payload():
-    require_virtualaxe_api(BASE_URL, env_vars=("BASE_URL",))
+    require_explicit_settings_api()
     require_bitaxe_settings_api()
 
     system_info = get_json(f"{BASE_URL}/api/system/info", timeout=10)
@@ -96,7 +102,7 @@ def test_system_settings_patch_accepts_large_form_payload():
 
 
 def test_pool_settings_patch_keeps_system_info_responsive():
-    require_virtualaxe_api(BASE_URL, env_vars=("BASE_URL",))
+    require_explicit_settings_api()
     require_bitaxe_settings_api()
 
     system_info = get_json(f"{BASE_URL}/api/system/info", timeout=10)

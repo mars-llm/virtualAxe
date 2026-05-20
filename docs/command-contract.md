@@ -54,7 +54,7 @@ right gate without guessing.
 | `make test-api` | runtime mutating | Runs API validation against a local virtual runtime. |
 | `make test-browser` | runtime mutating | Runs browser smoke validation against a local virtual runtime. |
 | `make verify-persistence` | runtime mutating | Verifies settings persistence across restart/rebuild. |
-| `make doctor` | tracked-source read-only | Probes configured source and local tool availability. |
+| `make doctor` | tracked-source read-only | Probes canonical configured sources and local tool availability. |
 
 ## Release Rule
 

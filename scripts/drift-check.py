@@ -50,6 +50,40 @@ def git_output(args: list[str], cwd: Path = ROOT_DIR) -> tuple[int, str, str]:
     return result.returncode, result.stdout.strip(), result.stderr.strip()
 
 
+def resolve_source_ref(source_dir: Path, ref: str) -> tuple[str, str]:
+    if not (source_dir / ".git").is_dir():
+        return "", "local source cache missing"
+    rc, resolved, error = git_output(["git", "-C", str(source_dir), "rev-parse", f"{ref}^{{commit}}"])
+    if rc != 0:
+        return "", error or f"git rev-parse failed for {ref}"
+    return resolved, ""
+
+
+def sync_source_cache(source_name: str, ref: str, *, reason: str) -> dict[str, Any]:
+    env = {
+        **os.environ,
+        "SOURCE": source_name,
+        "SOURCE_NAME": source_name,
+        "UPSTREAM_REF": ref,
+    }
+    result = subprocess.run(
+        [str(ROOT_DIR / "scripts" / "sync-upstream.sh")],
+        cwd=ROOT_DIR,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return {
+        "status": "passed" if result.returncode == 0 else "failed",
+        "classification": "ok" if result.returncode == 0 else "external source sync failed",
+        "reason": reason,
+        "returncode": result.returncode,
+        "stdout": result.stdout.strip(),
+        "stderr": result.stderr.strip(),
+    }
+
+
 def run_patch_apply(source_name: str, source_dir: Path, ref: str) -> dict[str, Any]:
     if not (source_dir / ".git").is_dir():
         return {
@@ -117,9 +151,25 @@ def drift_check(include_upstream_head: bool = False) -> dict[str, Any]:
     entry = sources["sources"][source_name]
     ref = entry["ref"]
     source_dir = ROOT_DIR / ".sources" / source_name
-    _rc, resolved, ref_error = git_output(["git", "-C", str(source_dir), "rev-parse", f"{ref}^{{commit}}"]) if source_dir.exists() else (1, "", "local source cache missing")
+    resolved, ref_error = resolve_source_ref(source_dir, ref)
+    source_sync = {
+        "status": "skipped",
+        "classification": "ok",
+        "reason": "configured source ref already resolved locally",
+    }
+    if not resolved:
+        source_sync = sync_source_cache(source_name, ref, reason=ref_error)
+        if source_sync["status"] == "passed":
+            resolved, ref_error = resolve_source_ref(source_dir, ref)
     series_digest = patch_series_hash(source_name)
-    configured_pin = run_patch_apply(source_name, source_dir, ref)
+    if source_sync["status"] == "failed":
+        configured_pin = {
+            "status": "skipped",
+            "classification": "external check skipped",
+            "reason": "source sync failed before patch apply",
+        }
+    else:
+        configured_pin = run_patch_apply(source_name, source_dir, ref)
     upstream_head = {"status": "skipped", "classification": "external check skipped", "reason": "run with --upstream-head"}
     if include_upstream_head:
         upstream_ref = "origin/master"
@@ -148,6 +198,8 @@ def drift_check(include_upstream_head: bool = False) -> dict[str, Any]:
     release_blockers = []
     if configured_pin["classification"] == "release-blocking drift":
         release_blockers.append("configured pin patch stack does not apply")
+    if source_sync["status"] == "failed":
+        release_blockers.append("configured source sync failed")
     if not resolved:
         release_blockers.append(f"configured source ref is not resolved locally: {ref_error}")
     return {
@@ -155,6 +207,7 @@ def drift_check(include_upstream_head: bool = False) -> dict[str, Any]:
         "source": source_name,
         "configuredRef": ref,
         "resolvedConfiguredRef": resolved,
+        "sourceSync": source_sync,
         "patchSeriesSha256": series_digest,
         "patchCount": len(series(source_name)),
         "configuredPinPatchCheck": configured_pin,

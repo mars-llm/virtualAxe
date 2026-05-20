@@ -33,7 +33,7 @@ help:
 	@printf "  make test-api       [runtime mutating] Run the API pytest suite\n"
 	@printf "  make test-browser   [runtime mutating] Run the Playwright smoke test\n"
 	@printf "  make verify-persistence  [runtime mutating] Verify saved settings survive restart and rebuild\n"
-	@printf "  make doctor         [tracked-source read-only] Probe the supported upstream checkout and local tooling\n"
+	@printf "  make doctor         [tracked-source read-only] Probe supported upstream checkouts and local tooling\n"
 
 .PHONY: help validate validate-lite validate-config secret-scan local-state-report drift-check patch-audit audit release-evidence sync-upstream build run dashboard e2e verify-submit-replay verify-release patch-check patch-check-upstream test-ci test-api test-browser verify-persistence doctor
 

@@ -56,6 +56,91 @@ def test_local_state_report_is_read_only_and_classifies_known_paths():
     assert by_path["out"]["canAffectBuildRunReview"] is True
 
 
+def test_drift_check_prepares_missing_source_cache(monkeypatch):
+    module = load_script("drift-check.py")
+    resolved_ref = "c" * 40
+    resolve_calls = iter(
+        [
+            ("", "local source cache missing"),
+            (resolved_ref, ""),
+        ]
+    )
+    sync_calls = []
+
+    def fake_resolve(_source_dir, ref):
+        assert ref == "ce44b2bbfef60ef8830ab17b321cc295e0c0edc8"
+        return next(resolve_calls)
+
+    def fake_sync(source_name, ref, *, reason):
+        sync_calls.append((source_name, ref, reason))
+        return {
+            "status": "passed",
+            "classification": "ok",
+            "reason": reason,
+            "returncode": 0,
+            "stdout": ".sources/bitaxe",
+            "stderr": "",
+        }
+
+    def fake_patch_apply(source_name, _source_dir, ref):
+        return {
+            "status": "passed",
+            "classification": "ok",
+            "source": source_name,
+            "requestedRef": ref,
+        }
+
+    monkeypatch.setattr(module, "resolve_source_ref", fake_resolve)
+    monkeypatch.setattr(module, "sync_source_cache", fake_sync)
+    monkeypatch.setattr(module, "run_patch_apply", fake_patch_apply)
+    monkeypatch.setattr(module, "manifest_status", lambda _source, _digest: {"status": "missing"})
+
+    payload = module.drift_check()
+
+    assert payload["status"] == "passed"
+    assert payload["sourceSync"]["status"] == "passed"
+    assert payload["resolvedConfiguredRef"] == resolved_ref
+    assert sync_calls == [
+        ("bitaxe", "ce44b2bbfef60ef8830ab17b321cc295e0c0edc8", "local source cache missing")
+    ]
+
+
+def test_drift_check_reports_source_sync_failure(monkeypatch):
+    module = load_script("drift-check.py")
+
+    monkeypatch.setattr(
+        module,
+        "resolve_source_ref",
+        lambda _source_dir, _ref: ("", "local source cache missing"),
+    )
+    monkeypatch.setattr(
+        module,
+        "sync_source_cache",
+        lambda _source, _ref, *, reason: {
+            "status": "failed",
+            "classification": "external source sync failed",
+            "reason": reason,
+            "returncode": 128,
+            "stdout": "",
+            "stderr": "network unavailable",
+        },
+    )
+
+    def fail_patch_apply(*_args, **_kwargs):
+        raise AssertionError("patch apply should not run when source sync fails")
+
+    monkeypatch.setattr(module, "run_patch_apply", fail_patch_apply)
+    monkeypatch.setattr(module, "manifest_status", lambda _source, _digest: {"status": "missing"})
+
+    payload = module.drift_check()
+
+    assert payload["status"] == "failed"
+    assert payload["sourceSync"]["status"] == "failed"
+    assert payload["configuredPinPatchCheck"]["status"] == "skipped"
+    assert "configured source sync failed" in payload["releaseBlockers"]
+    assert any("configured source ref is not resolved locally" in blocker for blocker in payload["releaseBlockers"])
+
+
 def test_validate_full_gate_prepares_local_state_and_avoids_live_pools():
     module = load_script("validate.py")
 
