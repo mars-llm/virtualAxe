@@ -1,0 +1,72 @@
+From 716d25153ce5fc116ff2c134dfcb172e140a7cc0 Mon Sep 17 00:00:00 2001
+From: virtualAxe <virtualaxe@example.invalid>
+Date: Wed, 6 May 2026 12:37:20 +0200
+Subject: [PATCH 02/13] virtual mining: keep stratum and worker responsive
+
+Why: keep the guest nonce search cooperative so replacement Stratum work can
+preempt long-running virtual searches under ESP32-S3 QEMU.
+Virtual-only: touches only the virtual ASIC implementation.
+Upstream surface: virtual ASIC task priority, yield cadence, and pending-work
+checks.
+Verify: run make verify-submit-replay and verify-test-ci.
+Removal impact: stale work can occupy the virtual worker long enough to harm
+Stratum responsiveness and accepted-share timing.
+
+---
+ components/asic/virtual_asic.c | 18 +++++++++++++++---
+ 1 file changed, 15 insertions(+), 3 deletions(-)
+
+diff --git a/components/asic/virtual_asic.c b/components/asic/virtual_asic.c
+index ef10ade..c0d9069 100644
+--- a/components/asic/virtual_asic.c
++++ b/components/asic/virtual_asic.c
+@@ -27,6 +27,9 @@ typedef struct
+ } virtual_job_snapshot_t;
+ 
+ static const char * TAG = "virtual_asic";
++static const uint32_t SEARCH_YIELD_INTERVAL = 0xFFFF;
++static const UBaseType_t WORKER_TASK_PRIORITY = 4;
++static const BaseType_t WORKER_TASK_CORE = 1;
+ 
+ static QueueHandle_t job_queue = NULL;
+ static QueueHandle_t result_queue = NULL;
+@@ -88,10 +91,16 @@ static bool search_valid_nonce(const virtual_job_snapshot_t * snapshot, uint32_t
+         }
+ 
+         nonce++;
+-        if ((nonce & 0xFFFF) == 0) {
++        if ((nonce & SEARCH_YIELD_INTERVAL) == 0) {
++            // Keep the virtual worker cooperative so the stratum task can
++            // receive replacement jobs promptly under QEMU without parking
++            // the miner for a full scheduler tick every tiny nonce batch.
+             virtual_record_hash_attempts(attempts_since_flush);
+             attempts_since_flush = 0;
+-            vTaskDelay(1 / portTICK_PERIOD_MS);
++            if (uxQueueMessagesWaiting(job_queue) > 0) {
++                return false;
++            }
++            taskYIELD();
+         }
+     }
+ }
+@@ -109,6 +118,9 @@ static void virtual_asic_worker(void * pvParameters)
+         uint32_t nonce = 0;
+         uint32_t rolled_version = snapshot.version;
+         if (!search_valid_nonce(&snapshot, &nonce, &rolled_version)) {
++            if (uxQueueMessagesWaiting(job_queue) > 0) {
++                continue;
++            }
+             ESP_LOGW(TAG, "No valid nonce found for virtual job %s", snapshot.jobid);
+             continue;
+         }
+@@ -160,7 +172,7 @@ uint8_t VIRTUAL_ASIC_init(GlobalState * GLOBAL_STATE)
+         result_queue = xQueueCreate(8, sizeof(task_result));
+     }
+     if (worker_task_handle == NULL) {
+-        xTaskCreate(virtual_asic_worker, "virtual_asic", 8192, NULL, 8, &worker_task_handle);
++        xTaskCreatePinnedToCore(virtual_asic_worker, "virtual_asic", 8192, NULL, WORKER_TASK_PRIORITY, &worker_task_handle, WORKER_TASK_CORE);
+     }
+     taskENTER_CRITICAL(&hash_counter_lock);
+     hash_attempt_counter = 0;
+-- 
+2.50.1 (Apple Git-155)

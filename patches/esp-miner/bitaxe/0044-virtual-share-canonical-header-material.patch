@@ -1,0 +1,363 @@
+From cce8b302e2680ff2593114c3bf3bfacf880f5e19 Mon Sep 17 00:00:00 2001
+From: virtualAxe <virtualaxe@example.invalid>
+Date: Wed, 6 May 2026 12:37:21 +0200
+Subject: [PATCH 09/13] virtual: share canonical header material
+
+Why: define one canonical block-header material path shared by software
+validation and virtual mining.
+Virtual-only: the shared helper is used by virtual ASIC search while preserving
+the upstream submit-time validator.
+Upstream surface: mining header helpers, virtual ASIC cache setup, and mining
+unit tests.
+Verify: run verify-test-ci and make verify-submit-replay.
+Removal impact: guest search and validator can diverge on header construction.
+
+---
+ components/asic/virtual_asic.c        | 76 ++++++++++++---------------
+ components/stratum/include/mining.h   | 14 ++++-
+ components/stratum/mining.c           | 63 ++++++++++++++++------
+ components/stratum/test/test_mining.c | 45 ++++++++++++++++
+ 4 files changed, 140 insertions(+), 58 deletions(-)
+
+diff --git a/components/asic/virtual_asic.c b/components/asic/virtual_asic.c
+index 3123c8b..90a084b 100644
+--- a/components/asic/virtual_asic.c
++++ b/components/asic/virtual_asic.c
+@@ -13,9 +13,6 @@
+ #include "utils.h"
+ #include "virtual_asic.h"
+ 
+-#define BITCOIN_HEADER_SIZE 80
+-#define BITCOIN_HEADER_TEMPLATE_SIZE 76
+-#define BITCOIN_HEADER_SUFFIX_SIZE 12
+ #define VIRTUAL_MAX_ROLLED_VERSIONS 4
+ #define BYTESWAP32(v) __builtin_bswap32(v)
+ #define RROT32(v, s) (((v) >> (s)) | ((v) << (32 - (s))))
+@@ -26,8 +23,8 @@ typedef struct
+     uint32_t starting_nonce;
+     uint8_t version_count;
+     uint32_t rolled_versions[VIRTUAL_MAX_ROLLED_VERSIONS];
+-    uint32_t first_block_midstates[VIRTUAL_MAX_ROLLED_VERSIONS][8];
+-    uint8_t header_suffixes[VIRTUAL_MAX_ROLLED_VERSIONS][BITCOIN_HEADER_SUFFIX_SIZE];
++    uint32_t first_chunk_states[VIRTUAL_MAX_ROLLED_VERSIONS][8];
++    uint32_t chunk1_words_be[VIRTUAL_MAX_ROLLED_VERSIONS][16];
+     double pool_diff;
+     char jobid[96];
+ } virtual_job_snapshot_t;
+@@ -90,15 +87,6 @@ static uint32_t virtual_hash_attempt_count(void)
+     return value;
+ }
+ 
+-static void build_header_template(uint8_t header_template[BITCOIN_HEADER_TEMPLATE_SIZE], uint32_t rolled_version, const bm_job * source)
+-{
+-    memcpy(header_template, &rolled_version, sizeof(rolled_version));
+-    reverse_32bit_words(source->prev_block_hash, header_template + 4);
+-    reverse_32bit_words(source->merkle_root, header_template + 36);
+-    memcpy(header_template + 68, &source->ntime, sizeof(source->ntime));
+-    memcpy(header_template + 72, &source->target, sizeof(source->target));
+-}
+-
+ static uint32_t load_be32(const uint8_t * data)
+ {
+     return ((uint32_t)data[0] << 24)
+@@ -107,11 +95,11 @@ static uint32_t load_be32(const uint8_t * data)
+         | (uint32_t)data[3];
+ }
+ 
+-static void sha256_compress(uint32_t state[8], const uint8_t block[64])
++static void sha256_compress_words(uint32_t state[8], const uint32_t block_words[16])
+ {
+     uint32_t w[64];
+     for (int i = 0; i < 16; i++) {
+-        w[i] = load_be32(block + (i * 4));
++        w[i] = block_words[i];
+     }
+     for (int i = 16; i < 64; i++) {
+         uint32_t s0 = RROT32(w[i - 15], 7) ^ RROT32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+@@ -156,37 +144,43 @@ static void sha256_compress(uint32_t state[8], const uint8_t block[64])
+     state[7] += h;
+ }
+ 
+-static void prepare_header_midstate(
+-    uint32_t first_block_midstate[8],
+-    uint8_t header_suffix[BITCOIN_HEADER_SUFFIX_SIZE],
+-    const uint8_t header_template[BITCOIN_HEADER_TEMPLATE_SIZE]
++static void sha256_compress(uint32_t state[8], const uint8_t block[64])
++{
++    uint32_t block_words[16];
++    for (int i = 0; i < 16; i++) {
++        block_words[i] = load_be32(block + (i * 4));
++    }
++    sha256_compress_words(state, block_words);
++}
++
++static void prepare_virtual_work_cache(
++    uint32_t first_chunk_state[8],
++    uint32_t chunk1_words_be[16],
++    const btc_header_material_t *material
+ )
+ {
+-    memcpy(first_block_midstate, SHA256_H0, sizeof(uint32_t) * 8);
+-    sha256_compress(first_block_midstate, header_template);
+-    memcpy(header_suffix, header_template + 64, BITCOIN_HEADER_SUFFIX_SIZE);
++    memcpy(first_chunk_state, SHA256_H0, sizeof(uint32_t) * 8);
++    sha256_compress(first_chunk_state, material->chunk0);
++    memcpy(chunk1_words_be, material->chunk1_be, sizeof(uint32_t) * 16);
+ }
+ 
+ static bool double_sha256_header_hash(
+-    const uint32_t first_block_midstate[8],
+-    const uint8_t header_suffix[BITCOIN_HEADER_SUFFIX_SIZE],
++    const uint32_t first_chunk_state[8],
++    const uint32_t chunk1_words_be[16],
+     uint32_t nonce,
+     uint8_t hash_result[32]
+ )
+ {
+-    uint8_t second_block[64] = {0};
+     uint8_t second_hash_block[64] = {0};
+     uint32_t state[8];
++    uint32_t second_block_words[16];
+     uint32_t second_hash_state[8];
+     uint8_t first_hash[32];
+ 
+-    memcpy(state, first_block_midstate, sizeof(uint32_t) * 8);
+-    memcpy(second_block, header_suffix, BITCOIN_HEADER_SUFFIX_SIZE);
+-    memcpy(second_block + BITCOIN_HEADER_SUFFIX_SIZE, &nonce, sizeof(nonce));
+-    second_block[16] = 0x80;
+-    second_block[62] = 0x02;
+-    second_block[63] = 0x80;
+-    sha256_compress(state, second_block);
++    memcpy(state, first_chunk_state, sizeof(uint32_t) * 8);
++    memcpy(second_block_words, chunk1_words_be, sizeof(second_block_words));
++    second_block_words[3] = BYTESWAP32(nonce);
++    sha256_compress_words(state, second_block_words);
+ 
+     for (int i = 0; i < 8; i++) {
+         uint32_t word = BYTESWAP32(state[i]);
+@@ -212,13 +206,13 @@ static bool double_sha256_header_hash(
+ }
+ 
+ static double virtual_job_diff_for_nonce(
+-    const uint32_t first_block_midstate[8],
+-    const uint8_t header_suffix[BITCOIN_HEADER_SUFFIX_SIZE],
++    const uint32_t first_chunk_state[8],
++    const uint32_t chunk1_words_be[16],
+     uint32_t nonce
+ )
+ {
+     uint8_t hash_result[32];
+-    if (!double_sha256_header_hash(first_block_midstate, header_suffix, nonce, hash_result)) {
++    if (!double_sha256_header_hash(first_chunk_state, chunk1_words_be, nonce, hash_result)) {
+         return 0.0;
+     }
+ 
+@@ -236,8 +230,8 @@ static bool virtual_job_test_nonce(const virtual_job_snapshot_t * snapshot, uint
+         (*attempts)++;
+         if (
+             virtual_job_diff_for_nonce(
+-                snapshot->first_block_midstates[i],
+-                snapshot->header_suffixes[i],
++                snapshot->first_chunk_states[i],
++                snapshot->chunk1_words_be[i],
+                 nonce
+             ) >= snapshot->pool_diff
+         ) {
+@@ -334,10 +328,10 @@ static void copy_job_snapshot(virtual_job_snapshot_t * snapshot, uint8_t job_id,
+ 
+     uint32_t rolled_version = source->version;
+     for (uint8_t i = 0; i < version_count; i++) {
+-        uint8_t header_template[BITCOIN_HEADER_TEMPLATE_SIZE];
++        btc_header_material_t material;
+         snapshot->rolled_versions[i] = rolled_version;
+-        build_header_template(header_template, rolled_version, source);
+-        prepare_header_midstate(snapshot->first_block_midstates[i], snapshot->header_suffixes[i], header_template);
++        bm_job_build_sha_material(source, rolled_version, 0, &material);
++        prepare_virtual_work_cache(snapshot->first_chunk_states[i], snapshot->chunk1_words_be[i], &material);
+         snapshot->version_count++;
+ 
+         if (i + 1 < version_count) {
+diff --git a/components/stratum/include/mining.h b/components/stratum/include/mining.h
+index d07543c..e493bf3 100644
+--- a/components/stratum/include/mining.h
++++ b/components/stratum/include/mining.h
+@@ -23,6 +23,14 @@ typedef struct
+     char *extranonce2;
+ } bm_job;
+ 
++typedef struct
++{
++    uint8_t header80[80];
++    uint8_t chunk0[64];
++    uint8_t chunk1[64];
++    uint32_t chunk1_be[16];
++} btc_header_material_t;
++
+ void free_bm_job(bm_job *job);
+ 
+ void calculate_coinbase_tx_hash(const char *coinbase_1, const char *coinbase_2,
+@@ -32,10 +40,14 @@ void calculate_merkle_root_hash(const uint8_t coinbase_tx_hash[32], const uint8_
+ 
+ void construct_bm_job(mining_notify *params, const uint8_t merkle_root[32], const uint32_t version_mask, const double difficulty, bm_job* new_job);
+ 
++void bm_job_build_header80(const bm_job *job, const uint32_t rolled_version, const uint32_t nonce, uint8_t out_header[static 80]);
++
++void bm_job_build_sha_material(const bm_job *job, const uint32_t rolled_version, const uint32_t nonce, btc_header_material_t *out_material);
++
+ double test_nonce_value(const bm_job *job, const uint32_t nonce, const uint32_t rolled_version);
+ 
+ void extranonce_2_generate(uint64_t extranonce_2, uint32_t length, char dest[static length * 2 + 1]);
+ 
+ uint32_t increment_bitmask(const uint32_t value, const uint32_t mask);
+ 
+-#endif /* MINING_H_ */
+\ No newline at end of file
++#endif /* MINING_H_ */
+diff --git a/components/stratum/mining.c b/components/stratum/mining.c
+index e09fcd2..03ebf67 100644
+--- a/components/stratum/mining.c
++++ b/components/stratum/mining.c
+@@ -6,6 +6,19 @@
+ #include "mbedtls/sha256.h"
+ #include "esp_log.h"
+ 
++enum {
++    BTC_HEADER_SIZE = 80,
++    BTC_HEADER_CHUNK_SIZE = 64,
++};
++
++static uint32_t load_be32(const uint8_t *data)
++{
++    return ((uint32_t)data[0] << 24)
++        | ((uint32_t)data[1] << 16)
++        | ((uint32_t)data[2] << 8)
++        | (uint32_t)data[3];
++}
++
+ void free_bm_job(bm_job *job)
+ {
+     free(job->jobid);
+@@ -116,27 +129,45 @@ void extranonce_2_generate(uint64_t extranonce_2, uint32_t length, char dest[sta
+  */
+ static const double truediffone = 26959535291011309493156476344723991336010898738574164086137773096960.0;
+ 
++void bm_job_build_header80(const bm_job *job, const uint32_t rolled_version, const uint32_t nonce, uint8_t out_header[static BTC_HEADER_SIZE])
++{
++    memcpy(out_header, &rolled_version, sizeof(rolled_version));
++    reverse_32bit_words(job->prev_block_hash, out_header + 4);
++    reverse_32bit_words(job->merkle_root, out_header + 36);
++    memcpy(out_header + 68, &job->ntime, sizeof(job->ntime));
++    memcpy(out_header + 72, &job->target, sizeof(job->target));
++    memcpy(out_header + 76, &nonce, sizeof(nonce));
++}
++
++void bm_job_build_sha_material(
++    const bm_job *job,
++    const uint32_t rolled_version,
++    const uint32_t nonce,
++    btc_header_material_t *out_material
++)
++{
++    memset(out_material, 0, sizeof(*out_material));
++    bm_job_build_header80(job, rolled_version, nonce, out_material->header80);
++
++    memcpy(out_material->chunk0, out_material->header80, BTC_HEADER_CHUNK_SIZE);
++    memcpy(out_material->chunk1, out_material->header80 + BTC_HEADER_CHUNK_SIZE, BTC_HEADER_SIZE - BTC_HEADER_CHUNK_SIZE);
++    out_material->chunk1[16] = 0x80;
++    out_material->chunk1[62] = 0x02;
++    out_material->chunk1[63] = 0x80;
++
++    for (int i = 0; i < 16; i++) {
++        out_material->chunk1_be[i] = load_be32(out_material->chunk1 + (i * 4));
++    }
++}
++
+ /* testing a nonce and return the diff - 0 means invalid */
+ double test_nonce_value(const bm_job *job, const uint32_t nonce, const uint32_t rolled_version)
+ {
+-    uint8_t header[80];
+-
+-    // // TODO: use the midstate hash instead of hashing the whole header
+-    // uint32_t rolled_version = job->version;
+-    // for (int i = 0; i < midstate_index; i++) {
+-    //     rolled_version = increment_bitmask(rolled_version, job->version_mask);
+-    // }
+-
+-    // copy data from job to header
+-    memcpy(header, &rolled_version, 4);
+-    reverse_32bit_words(job->prev_block_hash, header + 4);
+-    reverse_32bit_words(job->merkle_root, header + 36);
+-    memcpy(header + 68, &job->ntime, 4);
+-    memcpy(header + 72, &job->target, 4);
+-    memcpy(header + 76, &nonce, 4);
++    uint8_t header[BTC_HEADER_SIZE];
++    bm_job_build_header80(job, rolled_version, nonce, header);
+ 
+     uint8_t hash_result[32];
+-    double_sha256_bin(header, 80, hash_result);
++    double_sha256_bin(header, BTC_HEADER_SIZE, hash_result);
+ 
+     double d64 = truediffone;
+     double s64 = le256todouble(hash_result);
+diff --git a/components/stratum/test/test_mining.c b/components/stratum/test/test_mining.c
+index 8a87489..d9ca91c 100644
+--- a/components/stratum/test/test_mining.c
++++ b/components/stratum/test/test_mining.c
+@@ -5,6 +5,14 @@
+ #include <limits.h>
+ #include <string.h>
+ 
++static uint32_t test_load_be32(const uint8_t *data)
++{
++    return ((uint32_t)data[0] << 24)
++        | ((uint32_t)data[1] << 16)
++        | ((uint32_t)data[2] << 8)
++        | (uint32_t)data[3];
++}
++
+ TEST_CASE("Check coinbase tx construction", "[mining]")
+ {
+     const char *coinbase_1 = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff20020862062f503253482f04b8864e5008";
+@@ -236,3 +244,40 @@ TEST_CASE("Test nonce diff checking 2", "[mining test_nonce][not-on-qemu]")
+     double diff = test_nonce_value(&job, nonce, rolled_version);
+     TEST_ASSERT_EQUAL_INT(683, (int)diff);
+ }
++
++TEST_CASE("Build canonical header material for software and virtual mining", "[mining]")
++{
++    mining_notify notify_message;
++    notify_message.prev_block_hash = "d02b10fc0d4711eae1a805af50a8a83312a2215e00017f2b0000000000000000";
++    notify_message.version = 0x20000004;
++    notify_message.target = 0x1705ae3a;
++    notify_message.ntime = 0x646ff1a9;
++
++    uint8_t merkle_root[32];
++    hex2bin("6d0359c451434605c52a5a9ce074340be47c2c63840731f9edf1db3f26b1cdd9", merkle_root, 32);
++
++    bm_job job = { 0 };
++    construct_bm_job(&notify_message, merkle_root, 0, 1000, &job);
++
++    uint32_t nonce = 0x276E8947;
++    uint32_t rolled_version = job.version;
++    uint8_t header80[80];
++    btc_header_material_t material;
++
++    bm_job_build_header80(&job, rolled_version, nonce, header80);
++    bm_job_build_sha_material(&job, rolled_version, nonce, &material);
++
++    TEST_ASSERT_EQUAL_UINT8_ARRAY(header80, material.header80, sizeof(material.header80));
++    TEST_ASSERT_EQUAL_UINT8_ARRAY(header80, material.chunk0, sizeof(material.chunk0));
++    TEST_ASSERT_EQUAL_UINT8_ARRAY(header80 + 64, material.chunk1, 16);
++    TEST_ASSERT_EQUAL_HEX8(0x80, material.chunk1[16]);
++    TEST_ASSERT_EQUAL_HEX8(0x02, material.chunk1[62]);
++    TEST_ASSERT_EQUAL_HEX8(0x80, material.chunk1[63]);
++    for (int i = 17; i < 62; i++) {
++        TEST_ASSERT_EQUAL_HEX8(0x00, material.chunk1[i]);
++    }
++
++    for (int i = 0; i < 16; i++) {
++        TEST_ASSERT_EQUAL_HEX32(test_load_be32(material.chunk1 + (i * 4)), material.chunk1_be[i]);
++    }
++}
+-- 
+2.50.1 (Apple Git-155)

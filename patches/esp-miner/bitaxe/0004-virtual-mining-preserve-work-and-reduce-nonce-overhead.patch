@@ -1,0 +1,266 @@
+From 2b62a9dff0e0e0a8ee849e97ff539c0a635e9b8e Mon Sep 17 00:00:00 2001
+From: virtualAxe <virtualaxe@example.invalid>
+Date: Wed, 6 May 2026 12:37:20 +0200
+Subject: [PATCH 04/13] virtual mining: preserve work and reduce nonce overhead
+
+Why: keep valid virtual work active while reducing the guest-side per-nonce cost
+that makes QEMU mining feasible.
+Virtual-only: changes are limited to virtual ASIC search state and the virtual
+refresh path in create_jobs_task.
+Upstream surface: virtual ASIC work snapshots and job generation cadence.
+Verify: run make verify-submit-replay and verify-test-ci.
+Removal impact: the guest miner can restart useful work too often and miss
+low-difficulty submit opportunities.
+
+---
+ components/asic/virtual_asic.c | 87 ++++++++++++++++++++++++----------
+ main/tasks/create_jobs_task.c  | 59 +++++++++++++++++++++--
+ 2 files changed, 117 insertions(+), 29 deletions(-)
+
+diff --git a/components/asic/virtual_asic.c b/components/asic/virtual_asic.c
+index c0d9069..038e9e3 100644
+--- a/components/asic/virtual_asic.c
++++ b/components/asic/virtual_asic.c
+@@ -10,18 +10,20 @@
+ #include "freertos/task.h"
+ 
+ #include "mining.h"
++#include "utils.h"
+ #include "virtual_asic.h"
+ 
++#define BITCOIN_HEADER_SIZE 80
++#define BITCOIN_HEADER_TEMPLATE_SIZE 76
++#define VIRTUAL_MAX_ROLLED_VERSIONS 4
++
+ typedef struct
+ {
+     uint8_t job_id;
+-    uint32_t version;
+-    uint32_t version_mask;
+-    uint8_t prev_block_hash[32];
+-    uint8_t merkle_root[32];
+-    uint32_t ntime;
+-    uint32_t target;
+     uint32_t starting_nonce;
++    uint8_t version_count;
++    uint32_t rolled_versions[VIRTUAL_MAX_ROLLED_VERSIONS];
++    uint8_t header_templates[VIRTUAL_MAX_ROLLED_VERSIONS][BITCOIN_HEADER_TEMPLATE_SIZE];
+     double pool_diff;
+     char jobid[96];
+ } virtual_job_snapshot_t;
+@@ -30,6 +32,7 @@ static const char * TAG = "virtual_asic";
+ static const uint32_t SEARCH_YIELD_INTERVAL = 0xFFFF;
+ static const UBaseType_t WORKER_TASK_PRIORITY = 4;
+ static const BaseType_t WORKER_TASK_CORE = 1;
++static const double TRUEDIFF_ONE = 26959535291011309493156476344723991336010898738574164086137773096960.0;
+ 
+ static QueueHandle_t job_queue = NULL;
+ static QueueHandle_t result_queue = NULL;
+@@ -58,20 +61,43 @@ static uint32_t virtual_hash_attempt_count(void)
+     return value;
+ }
+ 
++static void build_header_template(uint8_t header_template[BITCOIN_HEADER_TEMPLATE_SIZE], uint32_t rolled_version, const bm_job * source)
++{
++    memcpy(header_template, &rolled_version, sizeof(rolled_version));
++    reverse_32bit_words(source->prev_block_hash, header_template + 4);
++    reverse_32bit_words(source->merkle_root, header_template + 36);
++    memcpy(header_template + 68, &source->ntime, sizeof(source->ntime));
++    memcpy(header_template + 72, &source->target, sizeof(source->target));
++}
++
++static double virtual_job_diff_for_nonce(const uint8_t header_template[BITCOIN_HEADER_TEMPLATE_SIZE], uint32_t nonce)
++{
++    uint8_t header[BITCOIN_HEADER_SIZE];
++    uint8_t hash_result[32];
++
++    memcpy(header, header_template, BITCOIN_HEADER_TEMPLATE_SIZE);
++    memcpy(header + BITCOIN_HEADER_TEMPLATE_SIZE, &nonce, sizeof(nonce));
++    double_sha256_bin(header, sizeof(header), hash_result);
++
++    double value = le256todouble(hash_result);
++    if (value == 0.0) {
++        return TRUEDIFF_ONE;
++    }
++
++    return TRUEDIFF_ONE / value;
++}
++
+ static bool virtual_job_test_nonce(const virtual_job_snapshot_t * snapshot, uint32_t nonce, uint32_t * rolled_version, uint32_t * attempts)
+ {
+-    bm_job job = {0};
+-    job.version = snapshot->version;
+-    job.version_mask = snapshot->version_mask;
+-    memcpy(job.prev_block_hash, snapshot->prev_block_hash, sizeof(job.prev_block_hash));
+-    memcpy(job.merkle_root, snapshot->merkle_root, sizeof(job.merkle_root));
+-    job.ntime = snapshot->ntime;
+-    job.target = snapshot->target;
+-    job.pool_diff = snapshot->pool_diff;
+-
+-    (*attempts)++;
+-    *rolled_version = snapshot->version;
+-    return test_nonce_value(&job, nonce, *rolled_version) >= snapshot->pool_diff;
++    for (uint8_t i = 0; i < snapshot->version_count; i++) {
++        (*attempts)++;
++        if (virtual_job_diff_for_nonce(snapshot->header_templates[i], nonce) >= snapshot->pool_diff) {
++            *rolled_version = snapshot->rolled_versions[i];
++            return true;
++        }
++    }
++
++    return false;
+ }
+ 
+ static bool search_valid_nonce(const virtual_job_snapshot_t * snapshot, uint32_t * out_nonce, uint32_t * rolled_version)
+@@ -116,7 +142,7 @@ static void virtual_asic_worker(void * pvParameters)
+         }
+ 
+         uint32_t nonce = 0;
+-        uint32_t rolled_version = snapshot.version;
++        uint32_t rolled_version = snapshot.rolled_versions[0];
+         if (!search_valid_nonce(&snapshot, &nonce, &rolled_version)) {
+             if (uxQueueMessagesWaiting(job_queue) > 0) {
+                 continue;
+@@ -148,14 +174,25 @@ static void copy_job_snapshot(virtual_job_snapshot_t * snapshot, uint8_t job_id,
+ {
+     memset(snapshot, 0, sizeof(*snapshot));
+     snapshot->job_id = job_id;
+-    snapshot->version = source->version;
+-    snapshot->version_mask = source->version_mask;
+-    snapshot->ntime = source->ntime;
+-    snapshot->target = source->target;
+     snapshot->starting_nonce = source->starting_nonce;
+     snapshot->pool_diff = source->pool_diff;
+-    memcpy(snapshot->prev_block_hash, source->prev_block_hash, sizeof(snapshot->prev_block_hash));
+-    memcpy(snapshot->merkle_root, source->merkle_root, sizeof(snapshot->merkle_root));
++
++    uint8_t version_count = source->num_midstates > 0 ? source->num_midstates : 1;
++    if (version_count > VIRTUAL_MAX_ROLLED_VERSIONS) {
++        version_count = VIRTUAL_MAX_ROLLED_VERSIONS;
++    }
++
++    uint32_t rolled_version = source->version;
++    for (uint8_t i = 0; i < version_count; i++) {
++        snapshot->rolled_versions[i] = rolled_version;
++        build_header_template(snapshot->header_templates[i], rolled_version, source);
++        snapshot->version_count++;
++
++        if (i + 1 < version_count) {
++            rolled_version = increment_bitmask(rolled_version, source->version_mask);
++        }
++    }
++
+     if (source->jobid != NULL) {
+         strncpy(snapshot->jobid, source->jobid, sizeof(snapshot->jobid) - 1);
+     }
+diff --git a/main/tasks/create_jobs_task.c b/main/tasks/create_jobs_task.c
+index 21425bb..71eb0b4 100644
+--- a/main/tasks/create_jobs_task.c
++++ b/main/tasks/create_jobs_task.c
+@@ -19,10 +19,13 @@ static const char *TAG = "create_jobs_task";
+ #define MAX_EXTRANONCE2_STR (MAX_EXTRANONCE2_LEN * 2 + 1)
+ 
+ static void generate_work(GlobalState *GLOBAL_STATE, mining_notify *notification, uint64_t extranonce_2, double difficulty);
++static bool use_periodic_work_refresh(const GlobalState *GLOBAL_STATE);
++static void update_virtual_active_job_difficulty(GlobalState *GLOBAL_STATE, double difficulty);
+ 
+ void create_jobs_task(void *pvParameters)
+ {
+     GlobalState *GLOBAL_STATE = (GlobalState *)pvParameters;
++    const bool periodic_work_refresh = use_periodic_work_refresh(GLOBAL_STATE);
+ 
+     // Initialize ASIC task module (moved from ASIC_task)
+     GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs = heap_caps_malloc(sizeof(bm_job *) * 128, MALLOC_CAP_SPIRAM);
+@@ -36,14 +39,19 @@ void create_jobs_task(void *pvParameters)
+     mining_notify *current_mining_notification = NULL;
+     uint64_t extranonce_2 = 0;
+     int timeout_ms = ASIC_get_asic_job_frequency_ms(GLOBAL_STATE);
++    const int virtual_poll_timeout_ms = 1000;
+ 
+     ESP_LOGI(TAG, "ASIC Job Interval: %d ms", timeout_ms);
+     ESP_LOGI(TAG, "ASIC Ready!");
+     
+     while (1) {
+         uint64_t start_time = esp_timer_get_time();
+-        mining_notify *new_mining_notification = (mining_notify *)queue_dequeue_timeout(&GLOBAL_STATE->stratum_queue, timeout_ms);
+-        timeout_ms -= (esp_timer_get_time() - start_time) / 1000;
++        int wait_timeout_ms = periodic_work_refresh ? timeout_ms : virtual_poll_timeout_ms;
++        mining_notify *new_mining_notification = (mining_notify *)queue_dequeue_timeout(&GLOBAL_STATE->stratum_queue, wait_timeout_ms);
++        if (periodic_work_refresh) {
++            timeout_ms -= (esp_timer_get_time() - start_time) / 1000;
++        }
++        bool should_generate_work = false;
+ 
+         if (new_mining_notification != NULL) {
+             if (current_mining_notification != NULL) {
+@@ -68,7 +76,9 @@ void create_jobs_task(void *pvParameters)
+ 
+             extranonce_2 = 0;
+ 
+-            if (!current_mining_notification->clean_jobs) {
++            if (!periodic_work_refresh || current_mining_notification->clean_jobs) {
++                should_generate_work = true;
++            } else {
+                 continue;
+             }
+         } else {
+@@ -76,15 +86,56 @@ void create_jobs_task(void *pvParameters)
+                 vTaskDelay(100 / portTICK_PERIOD_MS);
+                 continue;
+             }
++
++            if (!periodic_work_refresh) {
++                if (GLOBAL_STATE->new_set_mining_difficulty_msg) {
++                    ESP_LOGI(TAG, "New pool difficulty %.2f", GLOBAL_STATE->pool_difficulty);
++                    difficulty = GLOBAL_STATE->pool_difficulty;
++                    update_virtual_active_job_difficulty(GLOBAL_STATE, difficulty);
++                    GLOBAL_STATE->new_set_mining_difficulty_msg = false;
++                    should_generate_work = true;
++                }
++                if (!should_generate_work) {
++                    continue;
++                }
++            }
++        }
++
++        if (!should_generate_work && !periodic_work_refresh) {
++            continue;
+         }
+ 
+-        // Generate and send job (either new work or incremented extranonce_2)
++        // Generate and send work immediately for new jobs. Real hardware also
++        // refreshes the same notify periodically, but the virtual ASIC path
++        // keeps searching the current notify instead of restarting every
++        // interval under QEMU.
+         generate_work(GLOBAL_STATE, current_mining_notification, extranonce_2, difficulty);
+         extranonce_2++;
+         timeout_ms = ASIC_get_asic_job_frequency_ms(GLOBAL_STATE);
+     }
+ }
+ 
++static bool use_periodic_work_refresh(const GlobalState *GLOBAL_STATE)
++{
++    return GLOBAL_STATE->DEVICE_CONFIG.family.asic.id != ASIC_VIRTUAL;
++}
++
++static void update_virtual_active_job_difficulty(GlobalState *GLOBAL_STATE, double difficulty)
++{
++    pthread_mutex_lock(&GLOBAL_STATE->valid_jobs_lock);
++    for (int i = 0; i < 128; i++) {
++        if (!GLOBAL_STATE->valid_jobs[i]) {
++            continue;
++        }
++
++        bm_job *active_job = GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[i];
++        if (active_job != NULL) {
++            active_job->pool_diff = difficulty;
++        }
++    }
++    pthread_mutex_unlock(&GLOBAL_STATE->valid_jobs_lock);
++}
++
+ static void generate_work(GlobalState *GLOBAL_STATE, mining_notify *notification, uint64_t extranonce_2, double difficulty)
+ {
+     if (GLOBAL_STATE->extranonce_2_len > MAX_EXTRANONCE2_LEN) {
+-- 
+2.50.1 (Apple Git-155)

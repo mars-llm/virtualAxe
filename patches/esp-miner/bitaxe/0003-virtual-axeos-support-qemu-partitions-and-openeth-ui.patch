@@ -1,0 +1,527 @@
+From bddaad5ff211aa9b5721a445c7906455e395deec Mon Sep 17 00:00:00 2001
+From: virtualAxe <virtualaxe@example.invalid>
+Date: Wed, 6 May 2026 12:37:20 +0200
+Subject: [PATCH 03/13] virtual axeos: support qemu partitions and openeth ui
+
+Why: provide the partition map and loopback/OpenETH UI behavior needed by the
+real AxeOS bundle when it is served from the QEMU firmware image.
+Virtual-only: partition wrappers are linked only for CONFIG_BITAXE_VIRTUAL; the
+frontend adapts from runtime networkType metadata.
+Upstream surface: main CMake linkage, ESP partition lookup, HTTP origin
+handling, and the AxeOS network-edit component.
+Verify: run make build, API settings tests, and browser smoke tests.
+Removal impact: virtual firmware partition lookup and local AxeOS networking
+flows can fail or mislead users.
+
+---
+ main/CMakeLists.txt                           |  12 +
+ .../network-edit/network.edit.component.html  |  13 +-
+ .../network-edit/network.edit.component.ts    |  41 ++-
+ main/http_server/http_server.c                |  19 +-
+ main/virtual_partitions.c                     | 304 ++++++++++++++++++
+ 5 files changed, 370 insertions(+), 19 deletions(-)
+ create mode 100644 main/virtual_partitions.c
+
+diff --git a/main/CMakeLists.txt b/main/CMakeLists.txt
+index 76f1ade..a5b9ad8 100755
+--- a/main/CMakeLists.txt
++++ b/main/CMakeLists.txt
+@@ -20,6 +20,7 @@ SRCS
+     "./bap/bap_subscription.c"
+     "device_config.c"
+     "task_monitor.c"
++    "virtual_partitions.c"
+     "./http_server/http_server.c"
+     "./http_server/websocket.c"
+     "./http_server/theme_api.c"
+@@ -83,6 +84,17 @@ PRIV_REQUIRES
+ EMBED_FILES "http_server/recovery_page.html"
+ )
+ 
++if(CONFIG_BITAXE_VIRTUAL)
++    target_link_libraries(${COMPONENT_LIB} INTERFACE
++        "-Wl,--wrap=esp_partition_find"
++        "-Wl,--wrap=esp_partition_find_first"
++        "-Wl,--wrap=esp_partition_get"
++        "-Wl,--wrap=esp_partition_next"
++        "-Wl,--wrap=esp_partition_iterator_release"
++        "-Wl,--wrap=esp_ota_get_running_partition"
++    )
++endif()
++
+ idf_build_set_property(COMPILE_OPTIONS "-DLV_CONF_INCLUDE_SIMPLE=1" APPEND)
+ idf_build_set_property(COMPILE_OPTIONS "-DLV_CONF_PATH=\"${CMAKE_SOURCE_DIR}/main/lv_conf.h\"" APPEND)
+ 
+diff --git a/main/http_server/axe-os/src/app/components/network-edit/network.edit.component.html b/main/http_server/axe-os/src/app/components/network-edit/network.edit.component.html
+index ac9ffc6..0e5e100 100644
+--- a/main/http_server/axe-os/src/app/components/network-edit/network.edit.component.html
++++ b/main/http_server/axe-os/src/app/components/network-edit/network.edit.component.html
+@@ -1,5 +1,12 @@
+ <form *ngIf="form" [formGroup]="form">
+     <div class="card">
++        <p-message
++            *ngIf="usesHostNetwork"
++            severity="info"
++            styleClass="w-full mb-3 py-4 border-round-xl"
++            text="This virtual Gamma uses QEMU networking, so Wi-Fi credentials are not used here. Hostname changes still persist normally.">
++        </p-message>
++
+         <div class="field grid p-fluid">
+             <label for="hostname" class="col-12 md:col-2 md:m-0">
+                 <tooltip-text-icon
+@@ -11,7 +18,8 @@
+                 <input pInputText id="hostname" type="text" formControlName="hostname" />
+             </div>
+         </div>
+-        <div class="field grid p-fluid">
++
++        <div *ngIf="!usesHostNetwork" class="field grid p-fluid">
+             <label for="ssid" class="col-12 md:col-2 md:m-0">Wi-Fi SSID</label>
+             <div class="col-12 md:col-10 p-inputgroup">
+                 <input pInputText id="ssid" type="text" formControlName="ssid" />
+@@ -24,7 +32,8 @@
+                     tooltipPosition="left"></p-button>
+             </div>
+         </div>
+-        <div class="field grid p-fluid">
++
++        <div *ngIf="!usesHostNetwork" class="field grid p-fluid">
+             <label for="wifiPass" class="col-12 md:col-2 md:m-0">Wi-Fi Password</label>
+             <div class="col-12 md:col-10 p-input-icon-right">
+                 <i *ngIf="form.get('wifiPass')?.dirty" class="pi cursor-pointer"
+diff --git a/main/http_server/axe-os/src/app/components/network-edit/network.edit.component.ts b/main/http_server/axe-os/src/app/components/network-edit/network.edit.component.ts
+index b6fbdc3..7eb442c 100644
+--- a/main/http_server/axe-os/src/app/components/network-edit/network.edit.component.ts
++++ b/main/http_server/axe-os/src/app/components/network-edit/network.edit.component.ts
+@@ -21,6 +21,7 @@ export class NetworkEditComponent implements OnInit {
+   public form!: FormGroup;
+   public savedChanges: boolean = false;
+   public scanning: boolean = false;
++  public usesHostNetwork: boolean = false;
+ 
+   @Input() uri = '';
+ 
+@@ -38,11 +39,20 @@ export class NetworkEditComponent implements OnInit {
+     this.systemService.getInfo(this.uri)
+       .pipe(this.loadingService.lockUIUntilComplete())
+       .subscribe(info => {
++        // Detect the virtual Gamma network backend from runtime system info.
++        const runtimeInfo = info as typeof info & { networkType?: string };
++        this.usesHostNetwork = runtimeInfo.networkType?.toLowerCase() === 'openeth';
+         this.form = this.fb.group({
+           hostname: [info.hostname, [Validators.required]],
+-          ssid: [info.ssid, [Validators.required]],
++          ssid: [info.ssid, this.usesHostNetwork ? [] : [Validators.required]],
+           wifiPass: ['*****'],
+         });
++
++        if (this.usesHostNetwork) {
++          this.form.controls['ssid'].disable({ emitEvent: false });
++          this.form.controls['wifiPass'].disable({ emitEvent: false });
++        }
++
+         this.formSubject.next(this.form);
+       });
+   }
+@@ -52,16 +62,21 @@ export class NetworkEditComponent implements OnInit {
+ 
+     const form = this.form.getRawValue();
+ 
+-    // Allow an empty Wi-Fi password
+-    form.wifiPass = form.wifiPass == null ? '' : form.wifiPass;
+-
+-    if (form.wifiPass === '*****') {
++    if (this.usesHostNetwork) {
++      delete form.ssid;
+       delete form.wifiPass;
+-    }
+-
+-    // Trim SSID to remove any leading/trailing whitespace
+-    if (form.ssid) {
+-      form.ssid = form.ssid.trim();
++    } else {
++      // Allow an empty Wi-Fi password
++      form.wifiPass = form.wifiPass == null ? '' : form.wifiPass;
++
++      if (form.wifiPass === '*****') {
++        delete form.wifiPass;
++      }
++
++      // Trim SSID to remove any leading/trailing whitespace
++      if (form.ssid) {
++        form.ssid = form.ssid.trim();
++      }
+     }
+ 
+     this.systemService.updateSystem(this.uri, form)
+@@ -85,6 +100,10 @@ export class NetworkEditComponent implements OnInit {
+   }
+ 
+   public scanWifi() {
++    if (this.usesHostNetwork) {
++      return;
++    }
++
+     this.scanning = true;
+     this.http.get<{networks: WifiNetwork[]}>('/api/system/wifi/scan')
+       .pipe(
+@@ -132,7 +151,7 @@ export class NetworkEditComponent implements OnInit {
+   }
+ 
+   public restart() {
+-    this.systemService.restart()
++    this.systemService.restart(this.uri)
+       .pipe(this.loadingService.lockUIUntilComplete())
+       .subscribe({
+         next: () => {
+diff --git a/main/http_server/http_server.c b/main/http_server/http_server.c
+index b4595a1..acf0659 100644
+--- a/main/http_server/http_server.c
++++ b/main/http_server/http_server.c
+@@ -254,6 +254,11 @@ static esp_err_t ip_in_private_range(uint32_t address) {
+         return ESP_OK;
+     }
+ 
++    // 127.0.0.0 - 127.255.255.255 (Loopback)
++    if ((ip_address >= 0x7F000000) && (ip_address <= 0x7FFFFFFF)) {
++        return ESP_OK;
++    }
++
+     return ESP_FAIL;
+ }
+ 
+@@ -262,14 +267,16 @@ static uint32_t extract_origin_ip_addr(char *origin)
+     char ip_str[16];
+     uint32_t origin_ip_addr = 0;
+ 
+-    // Find the start of the IP address in the Origin header
+-    const char *prefix = "http://";
+-    char *ip_start = strstr(origin, prefix);
++    // Find the start of the hostname in the Origin header
++    char *scheme = strstr(origin, "://");
++    char *ip_start = scheme ? scheme + 3 : origin;
+     if (ip_start) {
+-        ip_start += strlen(prefix); // Move past "http://"
++        if (strncmp(ip_start, "localhost", strlen("localhost")) == 0) {
++            return inet_addr("127.0.0.1");
++        }
+ 
+-        // Extract the IP address portion (up to the next '/')
+-        char *ip_end = strchr(ip_start, '/');
++        // Extract the IP address portion (up to the next '/' or ':')
++        char *ip_end = strpbrk(ip_start, ":/");
+         size_t ip_len = ip_end ? (size_t)(ip_end - ip_start) : strlen(ip_start);
+         if (ip_len < sizeof(ip_str)) {
+             strncpy(ip_str, ip_start, ip_len);
+diff --git a/main/virtual_partitions.c b/main/virtual_partitions.c
+new file mode 100644
+index 0000000..b83d84a
+--- /dev/null
++++ b/main/virtual_partitions.c
+@@ -0,0 +1,304 @@
++#include "sdkconfig.h"
++
++#ifdef CONFIG_BITAXE_VIRTUAL
++
++#include <stdbool.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "esp_ota_ops.h"
++#include "esp_partition.h"
++
++#define VIRTUAL_PARTITION_ERASE_SIZE 0x1000
++#define VIRTUAL_PARTITION_ITERATOR_MAGIC 0x56505849u
++
++extern esp_flash_t * esp_flash_default_chip;
++
++extern esp_partition_iterator_t __real_esp_partition_find(esp_partition_type_t type,
++                                                          esp_partition_subtype_t subtype,
++                                                          const char * label);
++extern const esp_partition_t * __real_esp_partition_find_first(esp_partition_type_t type,
++                                                               esp_partition_subtype_t subtype,
++                                                               const char * label);
++extern const esp_partition_t * __real_esp_partition_get(esp_partition_iterator_t iterator);
++extern esp_partition_iterator_t __real_esp_partition_next(esp_partition_iterator_t iterator);
++extern void __real_esp_partition_iterator_release(esp_partition_iterator_t iterator);
++
++typedef struct {
++    uint32_t magic;
++    esp_partition_type_t type;
++    esp_partition_subtype_t subtype;
++    size_t index;
++    char label[17];
++} virtual_partition_iterator_t;
++
++static esp_partition_t s_virtual_partitions[] = {
++    {
++        .flash_chip = NULL,
++        .type = ESP_PARTITION_TYPE_DATA,
++        .subtype = ESP_PARTITION_SUBTYPE_DATA_NVS,
++        .address = 0x9000,
++        .size = 0x6000,
++        .erase_size = VIRTUAL_PARTITION_ERASE_SIZE,
++        .label = "nvs",
++    },
++    {
++        .flash_chip = NULL,
++        .type = ESP_PARTITION_TYPE_DATA,
++        .subtype = ESP_PARTITION_SUBTYPE_DATA_PHY,
++        .address = 0xf000,
++        .size = 0x1000,
++        .erase_size = VIRTUAL_PARTITION_ERASE_SIZE,
++        .label = "phy_init",
++    },
++    {
++        .flash_chip = NULL,
++        .type = ESP_PARTITION_TYPE_APP,
++        .subtype = ESP_PARTITION_SUBTYPE_APP_FACTORY,
++        .address = 0x10000,
++        .size = 0x400000,
++        .erase_size = VIRTUAL_PARTITION_ERASE_SIZE,
++        .label = "factory",
++    },
++    {
++        .flash_chip = NULL,
++        .type = ESP_PARTITION_TYPE_DATA,
++        .subtype = ESP_PARTITION_SUBTYPE_DATA_SPIFFS,
++        .address = 0x410000,
++        .size = 0x300000,
++        .erase_size = VIRTUAL_PARTITION_ERASE_SIZE,
++        .label = "www",
++    },
++    {
++        .flash_chip = NULL,
++        .type = ESP_PARTITION_TYPE_APP,
++        .subtype = ESP_PARTITION_SUBTYPE_APP_OTA_0,
++        .address = 0x710000,
++        .size = 0x400000,
++        .erase_size = VIRTUAL_PARTITION_ERASE_SIZE,
++        .label = "ota_0",
++    },
++    {
++        .flash_chip = NULL,
++        .type = ESP_PARTITION_TYPE_APP,
++        .subtype = ESP_PARTITION_SUBTYPE_APP_OTA_1,
++        .address = 0xb10000,
++        .size = 0x400000,
++        .erase_size = VIRTUAL_PARTITION_ERASE_SIZE,
++        .label = "ota_1",
++    },
++    {
++        .flash_chip = NULL,
++        .type = ESP_PARTITION_TYPE_DATA,
++        .subtype = ESP_PARTITION_SUBTYPE_DATA_OTA,
++        .address = 0xf10000,
++        .size = 0x2000,
++        .erase_size = VIRTUAL_PARTITION_ERASE_SIZE,
++        .label = "otadata",
++    },
++    {
++        .flash_chip = NULL,
++        .type = ESP_PARTITION_TYPE_DATA,
++        .subtype = ESP_PARTITION_SUBTYPE_DATA_COREDUMP,
++        .address = 0xf12000,
++        .size = 0x10000,
++        .erase_size = VIRTUAL_PARTITION_ERASE_SIZE,
++        .label = "coredump",
++    },
++};
++
++static void virtual_partitions_bind_flash_chip(void)
++{
++    static bool initialized = false;
++
++    if (initialized) {
++        return;
++    }
++
++    for (size_t i = 0; i < sizeof(s_virtual_partitions) / sizeof(s_virtual_partitions[0]); ++i) {
++        s_virtual_partitions[i].flash_chip = esp_flash_default_chip;
++    }
++
++    initialized = true;
++}
++
++static const esp_partition_t * virtual_partition_lookup(esp_partition_type_t type,
++                                                        esp_partition_subtype_t subtype,
++                                                        const char * label)
++{
++    for (size_t i = 0; i < sizeof(s_virtual_partitions) / sizeof(s_virtual_partitions[0]); ++i) {
++        const esp_partition_t * partition = &s_virtual_partitions[i];
++
++        if (type != ESP_PARTITION_TYPE_ANY && partition->type != type) {
++            continue;
++        }
++
++        if (subtype != ESP_PARTITION_SUBTYPE_ANY && partition->subtype != subtype) {
++            continue;
++        }
++
++        if (label != NULL && strcmp(label, partition->label) != 0) {
++            continue;
++        }
++
++        return partition;
++    }
++
++    return NULL;
++}
++
++static bool virtual_partition_matches(const esp_partition_t * partition,
++                                      esp_partition_type_t type,
++                                      esp_partition_subtype_t subtype,
++                                      const char * label)
++{
++    if (type != ESP_PARTITION_TYPE_ANY && partition->type != type) {
++        return false;
++    }
++
++    if (subtype != ESP_PARTITION_SUBTYPE_ANY && partition->subtype != subtype) {
++        return false;
++    }
++
++    if (label != NULL && strcmp(label, partition->label) != 0) {
++        return false;
++    }
++
++    return true;
++}
++
++static size_t virtual_partition_next_index(size_t start_index,
++                                           esp_partition_type_t type,
++                                           esp_partition_subtype_t subtype,
++                                           const char * label)
++{
++    for (size_t i = start_index; i < sizeof(s_virtual_partitions) / sizeof(s_virtual_partitions[0]); ++i) {
++        if (virtual_partition_matches(&s_virtual_partitions[i], type, subtype, label)) {
++            return i;
++        }
++    }
++
++    return sizeof(s_virtual_partitions) / sizeof(s_virtual_partitions[0]);
++}
++
++static bool virtual_partition_iterator_is_owned(esp_partition_iterator_t iterator)
++{
++    if (iterator == NULL) {
++        return false;
++    }
++
++    const virtual_partition_iterator_t * state = (const virtual_partition_iterator_t *) iterator;
++    return state->magic == VIRTUAL_PARTITION_ITERATOR_MAGIC;
++}
++
++static const char * virtual_partition_iterator_label(const virtual_partition_iterator_t * state)
++{
++    return state->label[0] != '\0' ? state->label : NULL;
++}
++
++static esp_partition_iterator_t virtual_partition_iterator_new(esp_partition_type_t type,
++                                                               esp_partition_subtype_t subtype,
++                                                               const char * label,
++                                                               size_t start_index)
++{
++    size_t index = virtual_partition_next_index(start_index, type, subtype, label);
++    if (index >= sizeof(s_virtual_partitions) / sizeof(s_virtual_partitions[0])) {
++        return NULL;
++    }
++
++    virtual_partition_iterator_t * state = calloc(1, sizeof(*state));
++    if (state == NULL) {
++        return NULL;
++    }
++
++    state->magic = VIRTUAL_PARTITION_ITERATOR_MAGIC;
++    state->type = type;
++    state->subtype = subtype;
++    state->index = index;
++    if (label != NULL) {
++        strncpy(state->label, label, sizeof(state->label) - 1);
++    }
++
++    return (esp_partition_iterator_t) state;
++}
++
++esp_partition_iterator_t __wrap_esp_partition_find(esp_partition_type_t type,
++                                                   esp_partition_subtype_t subtype,
++                                                   const char * label)
++{
++    virtual_partitions_bind_flash_chip();
++
++    esp_partition_iterator_t iterator = virtual_partition_iterator_new(type, subtype, label, 0);
++    if (iterator != NULL) {
++        return iterator;
++    }
++
++    return __real_esp_partition_find(type, subtype, label);
++}
++
++const esp_partition_t * __wrap_esp_partition_find_first(esp_partition_type_t type,
++                                                        esp_partition_subtype_t subtype,
++                                                        const char * label)
++{
++    virtual_partitions_bind_flash_chip();
++
++    const esp_partition_t * partition = virtual_partition_lookup(type, subtype, label);
++    if (partition != NULL) {
++        return partition;
++    }
++
++    return __real_esp_partition_find_first(type, subtype, label);
++}
++
++const esp_partition_t * __wrap_esp_partition_get(esp_partition_iterator_t iterator)
++{
++    if (virtual_partition_iterator_is_owned(iterator)) {
++        const virtual_partition_iterator_t * state = (const virtual_partition_iterator_t *) iterator;
++        return &s_virtual_partitions[state->index];
++    }
++
++    return __real_esp_partition_get(iterator);
++}
++
++esp_partition_iterator_t __wrap_esp_partition_next(esp_partition_iterator_t iterator)
++{
++    if (!virtual_partition_iterator_is_owned(iterator)) {
++        return __real_esp_partition_next(iterator);
++    }
++
++    virtual_partition_iterator_t * state = (virtual_partition_iterator_t *) iterator;
++    size_t next_index = virtual_partition_next_index(state->index + 1, state->type, state->subtype,
++                                                     virtual_partition_iterator_label(state));
++    if (next_index >= sizeof(s_virtual_partitions) / sizeof(s_virtual_partitions[0])) {
++        free(state);
++        return NULL;
++    }
++
++    state->index = next_index;
++    return iterator;
++}
++
++void __wrap_esp_partition_iterator_release(esp_partition_iterator_t iterator)
++{
++    if (virtual_partition_iterator_is_owned(iterator)) {
++        free(iterator);
++        return;
++    }
++
++    __real_esp_partition_iterator_release(iterator);
++}
++
++const esp_partition_t * __wrap_esp_ota_get_running_partition(void)
++{
++    virtual_partitions_bind_flash_chip();
++
++    const esp_partition_t * partition =
++        virtual_partition_lookup(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, "factory");
++    if (partition != NULL) {
++        return partition;
++    }
++
++    return __real_esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, "factory");
++}
++
++#endif
+-- 
+2.50.1 (Apple Git-155)

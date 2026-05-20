@@ -1,0 +1,25 @@
+{
+  "name": "virtualAxe",
+  "build": {
+    "context": "..",
+    "dockerfile": "../docker/Dockerfile.dev"
+  },
+  "workspaceFolder": "/workspace",
+  "remoteUser": "root",
+  "containerEnv": {
+    "IDF_TARGET": "esp32s3"
+  },
+  "postCreateCommand": "bash /workspace/scripts/bootstrap.sh --inside-container",
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash"
+      },
+      "extensions": [
+        "espressif.esp-idf-extension",
+        "ms-python.python",
+        "ms-playwright.playwright"
+      ]
+    }
+  }
+}

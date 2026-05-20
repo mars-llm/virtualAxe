@@ -1,0 +1,113 @@
+From a015c01bd3021161f450249119232644450104f0 Mon Sep 17 00:00:00 2001
+From: virtualAxe <virtualaxe@example.invalid>
+Date: Mon, 18 May 2026 22:26:55 +0200
+Subject: [PATCH] nerdnos: brand virtualaxe header
+
+Why: the virtual NerdNos board reports `virtualAxe Gamma` as its device model,
+but the source UI resolves header logos from device-model asset names. There is
+no upstream `virtualAxe Gamma` logo asset, so the virtual runtime shows a broken
+or empty logo. The header should keep the source-native NerdQAxe+ logo and label
+the QEMU runtime as virtualaxe below it.
+
+Virtual-only: only the `virtualAxe Gamma` device model takes the virtualaxe
+sublabel and NerdQAxe+ logo fallback. Physical NerdNos device models keep the
+normal device-model logo path.
+
+Upstream surface: NerdNos AxeOS header template, header styles, and header logo
+selection.
+
+Verify: SOURCE=nerdnos make patch-check, python3 scripts/virtualaxe.py
+verify-test-ci --source nerdnos --json, and refreshed NerdNos UI screenshots.
+
+Removal impact: NerdNos virtual screenshots and runtime UI can show an empty or
+broken logo asset path for the virtual source.
+---
+ .../components/header/header.component.html       |  7 ++++++-
+ .../components/header/header.component.scss       | 15 +++++++++++++++
+ .../@theme/components/header/header.component.ts  | 14 ++++++++++++--
+ 3 files changed, 33 insertions(+), 3 deletions(-)
+
+diff --git a/main/http_server/axe-os/src/app/@theme/components/header/header.component.html b/main/http_server/axe-os/src/app/@theme/components/header/header.component.html
+index 25b04489..44f0b36b 100644
+--- a/main/http_server/axe-os/src/app/@theme/components/header/header.component.html
++++ b/main/http_server/axe-os/src/app/@theme/components/header/header.component.html
+@@ -3,7 +3,12 @@
+     <a (click)="toggleSidebar()" href="#" class="sidebar-toggle">
+       <nb-icon icon="menu-2-outline"></nb-icon>
+     </a>
+-    <a class="logo" href="#" (click)="navigateHome()"><img [src]="logoPath" alt="Logo"></a>
++    <a class="logo" href="#" (click)="navigateHome()">
++      <span class="logo-stack">
++        <img [src]="logoPath" alt="Logo">
++        <span *ngIf="logoSubLabel" class="logo-sub-label">{{ logoSubLabel }}</span>
++      </span>
++    </a>
+   </div>
+ </div>
+
+diff --git a/main/http_server/axe-os/src/app/@theme/components/header/header.component.scss b/main/http_server/axe-os/src/app/@theme/components/header/header.component.scss
+index 0a309b99..d97021f1 100644
+--- a/main/http_server/axe-os/src/app/@theme/components/header/header.component.scss
++++ b/main/http_server/axe-os/src/app/@theme/components/header/header.component.scss
+@@ -50,11 +50,26 @@
+       white-space: nowrap;
+       text-decoration: none;
+
++      .logo-stack {
++        display: flex;
++        flex-direction: column;
++        align-items: flex-start;
++        line-height: 1;
++      }
++
+       img {
+         display: block;
+         max-height: 40px;
+         max-width: 100%;
+       }
++
++      .logo-sub-label {
++        color: nb-theme(text-hint-color);
++        font-size: 0.65rem;
++        font-weight: 700;
++        line-height: 1;
++        margin-top: 0.15rem;
++      }
+     }
+   }
+ /*
+diff --git a/main/http_server/axe-os/src/app/@theme/components/header/header.component.ts b/main/http_server/axe-os/src/app/@theme/components/header/header.component.ts
+index 6fde8494..108646cd 100644
+--- a/main/http_server/axe-os/src/app/@theme/components/header/header.component.ts
++++ b/main/http_server/axe-os/src/app/@theme/components/header/header.component.ts
+@@ -30,6 +30,7 @@ export class HeaderComponent implements OnInit, OnDestroy {
+
+   currentTheme = 'cosmic';  // Default theme if none is found in localStorage
+   logoPath: string = '';    // Resolved logo path for the template
++  logoSubLabel: string = '';
+   deviceModel: string = 'default'; // Fallback device model
+
+   private logoBaseName: string | null = null;
+@@ -87,9 +88,18 @@ export class HeaderComponent implements OnInit, OnDestroy {
+     // 2) Always load backend info (device name/model + default theme)
+     this.infoService.getInfo().subscribe(info => {
+       if (info?.deviceModel) {
++        const normalizedDeviceModel = String(info.deviceModel).replace('γ', 'Gamma').trim();
+         // Replace gamma symbol with "Gamma" to match asset filenames if needed
+-        this.deviceModel = String(info.deviceModel).replace('γ', 'Gamma');
+-        this.logoBaseName = String(info.deviceModel).trim();
++        this.deviceModel = normalizedDeviceModel;
++        this.logoBaseName = normalizedDeviceModel;
++
++        if (normalizedDeviceModel === 'virtualAxe Gamma') {
++          this.deviceModel = 'NerdQAxe+';
++          this.logoBaseName = 'NerdQAxe+';
++          this.logoSubLabel = 'virtualaxe';
++        } else {
++          this.logoSubLabel = '';
++        }
+       }
+
+       // Prefer backend default theme if no valid saved theme is present
+--
+2.50.1 (Apple Git-155)

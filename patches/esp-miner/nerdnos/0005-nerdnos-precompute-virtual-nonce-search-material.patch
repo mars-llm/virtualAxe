@@ -1,0 +1,303 @@
+From 832bfe9efa2d570420d6f560c1be3e7df88bbd87 Mon Sep 17 00:00:00 2001
+From: virtualAxe <virtualaxe@example.invalid>
+Date: Wed, 13 May 2026 13:07:19 +0200
+Subject: [PATCH] nerdnos: precompute virtual nonce search material
+
+Why: NerdNos live smoke phases reached API health, assigned pool difficulty, and virtual ASIC work but sometimes failed to produce a submit within the smoke window. Precomputing invariant SHA-256 header material keeps the guest-side virtual ASIC fast enough for low-difficulty live proof without moving work to the host.
+
+Virtual-only: only the VIRTUALAXE_GAMMA virtual ASIC search implementation changes. Physical NerdNos ASIC paths keep using their existing hardware result flow.
+
+Upstream surface: NerdNos virtual ASIC SHA cache, candidate filter, and nonce-difficulty calculation.
+
+Verify: SOURCE=nerdnos make patch-check, SOURCE=nerdnos make verify-submit-replay, python3 scripts/virtualaxe.py verify-test-ci --source nerdnos --json, and make verify-release SOURCE=nerdnos.
+
+Removal impact: live PublicPool and Nerdminers smoke phases remain probabilistic because the virtual ASIC recomputes full header hashes for every nonce.
+---
+ components/bm1397/virtual_asic.cpp | 236 ++++++++++++++++++++++++++++-
+ 1 file changed, 235 insertions(+), 1 deletion(-)
+
+diff --git a/components/bm1397/virtual_asic.cpp b/components/bm1397/virtual_asic.cpp
+index 3c529195..fd236a8c 100644
+--- a/components/bm1397/virtual_asic.cpp
++++ b/components/bm1397/virtual_asic.cpp
+@@ -9,6 +9,7 @@
+ #include "freertos/queue.h"
+ #include "freertos/task.h"
+ #include "mining.h"
++#include "mining_utils.h"
+
+ static const char *TAG = "virtual_asic";
+ static const uint32_t SEARCH_YIELD_INTERVAL = 0x3ff;
+@@ -16,6 +17,35 @@ static const UBaseType_t WORKER_TASK_PRIORITY = 1;
+ static const uint8_t VIRTUAL_VERSION_COUNT = 4;
+ static const uint8_t VIRTUAL_MAX_ASIC_JOBS = 128;
+
++enum {
++    BITCOIN_HEADER_TEMPLATE_SIZE = 76,
++    BITCOIN_HEADER_SUFFIX_SIZE = 12,
++};
++
++static const double TRUEDIFF_ONE = 26959535291011309493156476344723991336010898738574164086137773096960.0;
++static const uint32_t SHA256_H0[8] = {
++    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
++    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
++};
++static const uint32_t SHA256_K[64] = {
++    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
++    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
++    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
++    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
++    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
++    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
++    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
++    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
++    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
++    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
++    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
++    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
++    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
++    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
++    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
++    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
++};
++
+ typedef struct
+ {
+     uint8_t job_id;
+@@ -23,6 +53,8 @@ typedef struct
+     uint32_t starting_nonce;
+     uint8_t version_count;
+     uint32_t rolled_versions[VIRTUAL_VERSION_COUNT];
++    uint32_t first_chunk_states[VIRTUAL_VERSION_COUNT][8];
++    uint32_t chunk1_words_be[VIRTUAL_VERSION_COUNT][16];
+     bm_job job;
+     char jobid[96];
+ } virtual_job_snapshot_t;
+@@ -49,6 +81,197 @@ static uint32_t increment_bitmask(uint32_t value, uint32_t mask)
+     return new_value;
+ }
+
++static uint32_t byteswap32(uint32_t value)
++{
++    return __builtin_bswap32(value);
++}
++
++static uint32_t rotate_right32(uint32_t value, uint8_t shift)
++{
++    return (value >> shift) | (value << (32 - shift));
++}
++
++static uint32_t load_be32(const uint8_t *data)
++{
++    return ((uint32_t) data[0] << 24)
++        | ((uint32_t) data[1] << 16)
++        | ((uint32_t) data[2] << 8)
++        | (uint32_t) data[3];
++}
++
++static void sha256_compress_words(uint32_t state[8], const uint32_t block_words[16])
++{
++    uint32_t w[64];
++    for (int i = 0; i < 16; i++) {
++        w[i] = block_words[i];
++    }
++    for (int i = 16; i < 64; i++) {
++        uint32_t s0 = rotate_right32(w[i - 15], 7) ^ rotate_right32(w[i - 15], 18) ^ (w[i - 15] >> 3);
++        uint32_t s1 = rotate_right32(w[i - 2], 17) ^ rotate_right32(w[i - 2], 19) ^ (w[i - 2] >> 10);
++        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
++    }
++
++    uint32_t a = state[0];
++    uint32_t b = state[1];
++    uint32_t c = state[2];
++    uint32_t d = state[3];
++    uint32_t e = state[4];
++    uint32_t f = state[5];
++    uint32_t g = state[6];
++    uint32_t h = state[7];
++
++    for (int i = 0; i < 64; i++) {
++        uint32_t s1 = rotate_right32(e, 6) ^ rotate_right32(e, 11) ^ rotate_right32(e, 25);
++        uint32_t ch = (e & f) ^ ((~e) & g);
++        uint32_t temp1 = h + s1 + ch + SHA256_K[i] + w[i];
++        uint32_t s0 = rotate_right32(a, 2) ^ rotate_right32(a, 13) ^ rotate_right32(a, 22);
++        uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
++        uint32_t temp2 = s0 + maj;
++
++        h = g;
++        g = f;
++        f = e;
++        e = d + temp1;
++        d = c;
++        c = b;
++        b = a;
++        a = temp1 + temp2;
++    }
++
++    state[0] += a;
++    state[1] += b;
++    state[2] += c;
++    state[3] += d;
++    state[4] += e;
++    state[5] += f;
++    state[6] += g;
++    state[7] += h;
++}
++
++static void sha256_compress(uint32_t state[8], const uint8_t block[64])
++{
++    uint32_t block_words[16];
++    for (int i = 0; i < 16; i++) {
++        block_words[i] = load_be32(block + (i * 4));
++    }
++    sha256_compress_words(state, block_words);
++}
++
++static void build_header_template(uint8_t header_template[BITCOIN_HEADER_TEMPLATE_SIZE], uint32_t rolled_version, const bm_job *source)
++{
++    memcpy(header_template, &rolled_version, sizeof(rolled_version));
++    memcpy(header_template + 4, source->prev_block_hash, 32);
++    memcpy(header_template + 36, source->merkle_root, 32);
++    memcpy(header_template + 68, &source->ntime, sizeof(source->ntime));
++    memcpy(header_template + 72, &source->target, sizeof(source->target));
++}
++
++static void prepare_virtual_work_cache(
++    uint32_t first_chunk_state[8],
++    uint32_t chunk1_words_be[16],
++    const bm_job *source,
++    uint32_t rolled_version
++)
++{
++    uint8_t header_template[BITCOIN_HEADER_TEMPLATE_SIZE];
++    uint8_t header_chunk0[64] = {};
++    uint8_t header_suffix[BITCOIN_HEADER_SUFFIX_SIZE] = {};
++
++    build_header_template(header_template, rolled_version, source);
++    memcpy(header_chunk0, header_template, sizeof(header_chunk0));
++    memcpy(header_suffix, header_template + 64, sizeof(header_suffix));
++
++    memcpy(first_chunk_state, SHA256_H0, sizeof(uint32_t) * 8);
++    sha256_compress(first_chunk_state, header_chunk0);
++
++    memset(chunk1_words_be, 0, sizeof(uint32_t) * 16);
++    for (int i = 0; i < 3; i++) {
++        chunk1_words_be[i] = load_be32(header_suffix + (i * 4));
++    }
++    chunk1_words_be[4] = 0x80000000;
++    chunk1_words_be[15] = 0x00000280;
++}
++
++static void double_sha256_header_hash_exact(
++    const uint32_t first_chunk_state[8],
++    const uint32_t chunk1_words_be[16],
++    uint32_t nonce,
++    uint8_t hash_result[32]
++)
++{
++    uint8_t first_hash[32];
++    uint8_t second_hash_block[64] = {};
++    uint32_t state[8];
++    uint32_t second_block_words[16];
++    uint32_t second_hash_state[8];
++
++    memcpy(state, first_chunk_state, sizeof(uint32_t) * 8);
++    memcpy(second_block_words, chunk1_words_be, sizeof(uint32_t) * 16);
++    second_block_words[3] = byteswap32(nonce);
++    sha256_compress_words(state, second_block_words);
++
++    for (int i = 0; i < 8; i++) {
++        uint32_t word = byteswap32(state[i]);
++        memcpy(first_hash + (i * 4), &word, sizeof(word));
++    }
++
++    memcpy(second_hash_block, first_hash, sizeof(first_hash));
++    second_hash_block[32] = 0x80;
++    second_hash_block[62] = 0x01;
++    second_hash_block[63] = 0x00;
++    memcpy(second_hash_state, SHA256_H0, sizeof(second_hash_state));
++    sha256_compress(second_hash_state, second_hash_block);
++
++    for (int i = 0; i < 8; i++) {
++        uint32_t word = byteswap32(second_hash_state[i]);
++        memcpy(hash_result + (i * 4), &word, sizeof(word));
++    }
++}
++
++static double virtual_hash_diff(const uint8_t hash_result[32])
++{
++    double value = le256todouble(hash_result);
++    if (value == 0.0) {
++        return TRUEDIFF_ONE;
++    }
++    return TRUEDIFF_ONE / value;
++}
++
++static bool virtual_hash_candidate_filter_accepts(const uint8_t hash_result[32], double pool_diff)
++{
++    if (pool_diff < 1.0) {
++        if (pool_diff >= (1.0 / 65536.0)) {
++            return hash_result[31] == 0 && hash_result[30] == 0;
++        }
++        if (pool_diff >= (1.0 / 16777216.0)) {
++            return hash_result[31] == 0;
++        }
++        return true;
++    }
++
++    return hash_result[28] == 0
++        && hash_result[29] == 0
++        && hash_result[30] == 0
++        && hash_result[31] == 0;
++}
++
++static bool virtual_job_candidate_diff_for_nonce(
++    const uint32_t first_chunk_state[8],
++    const uint32_t chunk1_words_be[16],
++    uint32_t nonce,
++    double pool_diff,
++    double *out_diff
++)
++{
++    uint8_t hash_result[32];
++    double_sha256_header_hash_exact(first_chunk_state, chunk1_words_be, nonce, hash_result);
++    if (!virtual_hash_candidate_filter_accepts(hash_result, pool_diff)) {
++        return false;
++    }
++    *out_diff = virtual_hash_diff(hash_result);
++    return true;
++}
++
+ static void snapshot_job(virtual_job_snapshot_t *snapshot, uint8_t job_id, const bm_job *source)
+ {
+     memset(snapshot, 0, sizeof(*snapshot));
+@@ -65,15 +288,26 @@ static void snapshot_job(virtual_job_snapshot_t *snapshot, uint8_t job_id, const
+
+     snapshot->version_count = source->version_mask == 0 ? 1 : VIRTUAL_VERSION_COUNT;
+     snapshot->rolled_versions[0] = source->version;
++    prepare_virtual_work_cache(snapshot->first_chunk_states[0], snapshot->chunk1_words_be[0], &snapshot->job, snapshot->rolled_versions[0]);
+     for (uint8_t i = 1; i < snapshot->version_count; i++) {
+         snapshot->rolled_versions[i] = increment_bitmask(snapshot->rolled_versions[i - 1], source->version_mask);
++        prepare_virtual_work_cache(snapshot->first_chunk_states[i], snapshot->chunk1_words_be[i], &snapshot->job, snapshot->rolled_versions[i]);
+     }
+ }
+
+ static bool test_snapshot_nonce(const virtual_job_snapshot_t *snapshot, uint32_t nonce, uint32_t *rolled_version)
+ {
+     for (uint8_t i = 0; i < snapshot->version_count; i++) {
+-        double diff = test_nonce_value(&snapshot->job, nonce, snapshot->rolled_versions[i]);
++        double diff = 0.0;
++        if (!virtual_job_candidate_diff_for_nonce(
++            snapshot->first_chunk_states[i],
++            snapshot->chunk1_words_be[i],
++            nonce,
++            snapshot->job.pool_diff,
++            &diff
++        )) {
++            continue;
++        }
+         if (diff >= snapshot->job.pool_diff) {
+             *rolled_version = snapshot->rolled_versions[i];
+             return true;
+--
+2.50.1 (Apple Git-155)

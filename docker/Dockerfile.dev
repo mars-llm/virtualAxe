@@ -1,0 +1,56 @@
+FROM espressif/idf:v5.5.3
+
+SHELL ["/bin/bash", "-lc"]
+
+ARG NODE_MAJOR=22
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+      gettext-base \
+      git \
+      jq \
+      libasound2t64 \
+      libatk-bridge2.0-0 \
+      libatk1.0-0 \
+      libcups2 \
+      libdrm2 \
+      libgbm1 \
+      libgcrypt20 \
+      libglib2.0-0 \
+      libgtk-3-0 \
+      libnspr4 \
+      libnss3 \
+      libpixman-1-0 \
+      libslirp0 \
+      libx11-6 \
+      libx11-xcb1 \
+      libxcb1 \
+      libxcomposite1 \
+      libxdamage1 \
+      libxext6 \
+      libxfixes3 \
+      libxkbcommon0 \
+      libxrandr2 \
+      net-tools \
+      openssh-client \
+      python3-pip \
+      python3-venv \
+      unzip \
+      xdg-utils \
+      xvfb && \
+    curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    python "$IDF_PATH/tools/idf_tools.py" install qemu-xtensa qemu-riscv32 && \
+    python -m pip install --break-system-packages --no-cache-dir \
+      aiohttp \
+      pytest \
+      requests \
+      rich \
+      textual \
+      websockets && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace

@@ -1,0 +1,13 @@
+0001-virtual-gamma-add-qemu-firmware-foundation.patch
+0002-virtual-mining-keep-stratum-and-worker-responsive.patch
+0003-virtual-axeos-support-qemu-partitions-and-openeth-ui.patch
+0004-virtual-mining-preserve-work-and-reduce-nonce-overhead.patch
+0005-virtual-gamma-apply-profile-metadata-and-deterministic-sensors.patch
+0006-virtual-mining-precompute-nonce-search-material.patch
+0007-virtual-api-handle-qemu-patch-and-static-responses.patch
+0008-virtual-mining-keep-guest-worker-responsive-under-qemu.patch
+0044-virtual-share-canonical-header-material.patch
+0045-virtual-align-guest-digest-path-with-software-validator.patch
+0046-virtual-guard-submit-boundary-with-work-generations.patch
+0047-virtual-api-keep-settings-updates-responsive.patch
+0048-virtual-pool-support-low-difficulty-interoperability.patch

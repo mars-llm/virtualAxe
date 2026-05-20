@@ -1,0 +1,79 @@
+From 009fa2ebbc46b1ef3657ad8c900ba1a5bfa1ddbf Mon Sep 17 00:00:00 2001
+From: virtualAxe <virtualaxe@example.invalid>
+Date: Wed, 6 May 2026 12:37:21 +0200
+Subject: [PATCH 08/13] virtual mining: keep guest worker responsive under qemu
+
+Why: bound virtual search batches so API, NVS, and Stratum tasks remain
+responsive while nonce search runs inside the guest.
+Virtual-only: changes are limited to the virtual ASIC worker.
+Upstream surface: virtual ASIC yield interval, task creation, and worker logs.
+Verify: run make verify-submit-replay and API responsiveness tests.
+Removal impact: QEMU scheduling can delay settings, API, or pool processing
+during active guest-side mining.
+
+---
+ components/asic/virtual_asic.c | 17 ++++++++++-------
+ 1 file changed, 10 insertions(+), 7 deletions(-)
+
+diff --git a/components/asic/virtual_asic.c b/components/asic/virtual_asic.c
+index 421b44a..3123c8b 100644
+--- a/components/asic/virtual_asic.c
++++ b/components/asic/virtual_asic.c
+@@ -33,9 +33,11 @@ typedef struct
+ } virtual_job_snapshot_t;
+ 
+ static const char * TAG = "virtual_asic";
+-static const uint32_t SEARCH_YIELD_INTERVAL = 0xFFFF;
++// Under QEMU, the guest miner may only cover a few hundred nonces per second.
++// Smaller batches let it react promptly when the pool lowers difficulty or
++// publishes replacement work, instead of spending minutes on stale jobs.
++static const uint32_t SEARCH_YIELD_INTERVAL = 0x3FF;
+ static const UBaseType_t WORKER_TASK_PRIORITY = 4;
+-static const BaseType_t WORKER_TASK_CORE = 1;
+ static const double TRUEDIFF_ONE = 26959535291011309493156476344723991336010898738574164086137773096960.0;
+ static const uint32_t SHA256_H0[8] = {
+     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+@@ -265,15 +267,14 @@ static bool search_valid_nonce(const virtual_job_snapshot_t * snapshot, uint32_t
+ 
+         nonce++;
+         if ((nonce & SEARCH_YIELD_INTERVAL) == 0) {
+-            // Keep the virtual worker cooperative so the stratum task can
+-            // receive replacement jobs promptly under QEMU without parking
+-            // the miner for a full scheduler tick every tiny nonce batch.
++            // Keep the virtual worker cooperative so API and NVS tasks keep
++            // responding under QEMU while the guest miner is searching.
+             virtual_record_hash_attempts(attempts_since_flush);
+             attempts_since_flush = 0;
+             if (uxQueueMessagesWaiting(job_queue) > 0) {
+                 return false;
+             }
+-            taskYIELD();
++            vTaskDelay(1 / portTICK_PERIOD_MS);
+         }
+     }
+ }
+@@ -282,11 +283,13 @@ static void virtual_asic_worker(void * pvParameters)
+ {
+     (void)pvParameters;
+ 
++    ESP_LOGI(TAG, "Virtual ASIC worker task started");
+     virtual_job_snapshot_t snapshot;
+     while (1) {
+         if (xQueueReceive(job_queue, &snapshot, portMAX_DELAY) != pdTRUE) {
+             continue;
+         }
++        ESP_LOGI(TAG, "Virtual ASIC worker received job %s (diff %.4f)", snapshot.jobid, snapshot.pool_diff);
+ 
+         uint32_t nonce = 0;
+         uint32_t rolled_version = snapshot.rolled_versions[0];
+@@ -358,7 +361,7 @@ uint8_t VIRTUAL_ASIC_init(GlobalState * GLOBAL_STATE)
+         result_queue = xQueueCreate(8, sizeof(task_result));
+     }
+     if (worker_task_handle == NULL) {
+-        xTaskCreatePinnedToCore(virtual_asic_worker, "virtual_asic", 8192, NULL, WORKER_TASK_PRIORITY, &worker_task_handle, WORKER_TASK_CORE);
++        xTaskCreate(virtual_asic_worker, "virtual_asic", 8192, NULL, WORKER_TASK_PRIORITY, &worker_task_handle);
+     }
+     jobs_assigned = 0;
+     taskENTER_CRITICAL(&hash_counter_lock);
+-- 
+2.50.1 (Apple Git-155)

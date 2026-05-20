@@ -1,0 +1,393 @@
+From 4c3a2666e64dd093afb7acc3486a2edaf1c26686 Mon Sep 17 00:00:00 2001
+From: virtualAxe <virtualaxe@example.invalid>
+Date: Mon, 11 May 2026 14:59:24 +0200
+Subject: [PATCH] nerdnos: support virtual low difficulty pools
+
+Why: NerdNos virtual live smoke must interoperate with the same low-difficulty
+PublicPool, Bitronics, and Nerdminers pools used by the Bitaxe source. The
+upstream NerdNos difficulty path stores the suggested difficulty as an integer
+and truncates assigned fractional pool difficulty to zero in the system API.
+It also reads suggested difficulty outside the source-native per-pool Stratum
+configuration snapshot, so virtual live phases can send a stale integer
+suggestion after a fractional difficulty was seeded. Its virtual board
+subscribe identity is also rejected by Nerdminer-compatible pools. When
+optional extranonce subscribe is disabled, the first submit can also reuse the
+optional setup-response ID and be counted as setup instead of an accepted
+share.
+
+Virtual-only: the subscribe identity change is limited to the `VIRTUALAXE_GAMMA`
+board. Fractional suggested and assigned difficulty preserves existing integer
+values and only broadens the Stratum V1/API projection type.
+
+Upstream surface: virtual board identity, Stratum V1 suggested difficulty,
+per-pool Stratum config snapshots, assigned pool difficulty projection,
+optional setup response ID reservation, and the V1 job validity guard.
+
+Verify: SOURCE=nerdnos make patch-check, SOURCE=nerdnos make verify-submit-replay,
+and make verify-release SOURCE=nerdnos.
+
+Removal impact: PublicPool and Bitronics can keep assigning high difficulty
+during smoke, Nerdminer-compatible pools reject the subscribe identity, and a
+notify without an established extranonce can panic the NerdNos job builder.
+Pools that accept the first submitted share can have that response classified
+as setup, leaving firmware/API accepted counters unchanged.
+
+---
+ main/boards/virtualaxe_gamma.cpp         |  2 +-
+ main/nvs_config.h                        | 18 +++++++++++++++++-
+ main/stratum/stratum_api.cpp             | 11 +++++++++--
+ main/stratum/stratum_api.h               |  4 +++-
+ main/stratum/stratum_config.cpp          |  8 +++++++-
+ main/stratum/stratum_config.h            |  7 ++++++-
+ main/stratum/stratum_manager.cpp         |  2 +-
+ main/stratum/stratum_manager.h           |  4 ++--
+ main/stratum/stratum_manager_dual_pool.h |  6 +++---
+ main/stratum/stratum_manager_fallback.h  |  6 +++---
+ main/stratum/stratum_task.cpp            |  8 +++++++-
+ main/tasks/create_jobs_task.cpp          |  7 ++++++-
+ 12 files changed, 65 insertions(+), 18 deletions(-)
+
+diff --git a/main/boards/virtualaxe_gamma.cpp b/main/boards/virtualaxe_gamma.cpp
+index 3b95dbb2..97947e4e 100644
+--- a/main/boards/virtualaxe_gamma.cpp
++++ b/main/boards/virtualaxe_gamma.cpp
+@@ -8,7 +8,7 @@
+ VirtualAxeGamma::VirtualAxeGamma() : Board()
+ {
+     m_deviceModel = "virtualAxe Gamma";
+-    m_miningAgent = "virtualAxe-gamma";
++    m_miningAgent = "NerdMinerV2";
+     m_version = 1;
+     m_asicModel = "BM1370";
+     m_asicCount = 1;
+diff --git a/main/nvs_config.h b/main/nvs_config.h
+index 0cca96c4..f9eb80bd 100644
+--- a/main/nvs_config.h
++++ b/main/nvs_config.h
+@@ -3,6 +3,7 @@
+ // clang-format off
+
+ #include <stdint.h>
++#include <stdlib.h>
+
+ // Max length 15
+ #define NVS_CONFIG_WIFI_SSID "wifissid"
+@@ -21,6 +22,7 @@
+ #define NVS_CONFIG_STRATUM_FALLBACK_ENONCE_SUB "fbstratumesub"
+ #define NVS_CONFIG_STRATUM_FALLBACK_TLS "fbstratumtls"
+ #define NVS_CONFIG_STRATUM_DIFFICULTY "stratumdiff"
++#define NVS_CONFIG_STRATUM_FALLBACK_DIFFICULTY "fbstratumdiff"
+ #define NVS_CONFIG_STRATUM_KEEPALIVE "stratum_keep"
+
+ #define NVS_CONFIG_ASIC_FREQ "asicfrequency"
+@@ -246,7 +248,21 @@ namespace Config {
+
+     // ---- uint64_t Getters ----
+     inline uint64_t getBestDiff() { return nvs_config_get_u64(NVS_CONFIG_BEST_DIFF, 0); }
+-    inline uint32_t getStratumDifficulty() { return (uint32_t) nvs_config_get_u64(NVS_CONFIG_STRATUM_DIFFICULTY, CONFIG_STRATUM_DIFFICULTY); }
++    inline double parseStratumDifficulty(const char *key, uint64_t default_value) {
++        char *difficulty = nvs_config_get_string(key, "");
++        if (difficulty) {
++            char *end = nullptr;
++            double value = strtod(difficulty, &end);
++            bool parsed = end && *end == '\0' && value > 0;
++            free(difficulty);
++            if (parsed) {
++                return value;
++            }
++        }
++        return (double) nvs_config_get_u64(key, default_value);
++    }
++    inline double getStratumDifficulty() { return parseStratumDifficulty(NVS_CONFIG_STRATUM_DIFFICULTY, CONFIG_STRATUM_DIFFICULTY); }
++    inline double getStratumFallbackDifficulty() { return parseStratumDifficulty(NVS_CONFIG_STRATUM_FALLBACK_DIFFICULTY, CONFIG_STRATUM_DIFFICULTY); }
+     inline uint32_t getTotalFoundBlocks() { return (uint32_t) nvs_config_get_u64(NVS_TOTAL_FOUND_BLOCKS, 0); }
+
+     // ---- uint64_t Setters ----
+diff --git a/main/stratum/stratum_api.cpp b/main/stratum/stratum_api.cpp
+index 23d3e0a8..bc26dfbc 100644
+--- a/main/stratum/stratum_api.cpp
++++ b/main/stratum/stratum_api.cpp
+@@ -463,10 +463,10 @@ bool StratumApi::entranonceSubscribe(StratumTransport *transport)
+ //--------------------------------------------------------------------
+ // suggestDifficulty()
+ //--------------------------------------------------------------------
+-bool StratumApi::suggestDifficulty(StratumTransport *transport, uint32_t difficulty)
++bool StratumApi::suggestDifficulty(StratumTransport *transport, double difficulty)
+ {
+-    snprintf(m_requestBuffer, BUFFER_SIZE, "{\"id\": %d, \"method\": \"mining.suggest_difficulty\", \"params\": [%ld]}\n",
++    snprintf(m_requestBuffer, BUFFER_SIZE, "{\"id\": %d, \"method\": \"mining.suggest_difficulty\", \"params\": [%.8g]}\n",
+              m_send_uid++, difficulty);
+-
++
+     return send(transport, m_requestBuffer);
+ }
+@@ -516,8 +516,15 @@ void StratumApi::resetUid()
+ {
+     ESP_LOGI(TAG, "Resetting stratum uid");
+     m_send_uid = 1;
+ }
+-
++
++void StratumApi::reserveOptionalSetupIds()
++{
++    if (m_send_uid <= STRATUM_LAST_SETUP_ID) {
++        m_send_uid = STRATUM_LAST_SETUP_ID + 1;
++    }
++}
++
+ //--------------------------------------------------------------------
+ // clearBuffer()
+ //--------------------------------------------------------------------
+diff --git a/main/stratum/stratum_api.h b/main/stratum/stratum_api.h
+index 9909e11d..cb0d9d70 100644
+--- a/main/stratum/stratum_api.h
++++ b/main/stratum/stratum_api.h
+@@ -114,7 +114,7 @@ class StratumApi {
+     bool entranonceSubscribe(StratumTransport *transport);
+
+     // Sends a suggest-difficulty message.
+-    bool suggestDifficulty(StratumTransport *transport, uint32_t difficulty);
++    bool suggestDifficulty(StratumTransport *transport, double difficulty);
+
+     // Sends an authentication message.
+     bool authenticate(StratumTransport *transport, const char *username, const char *pass);
+@@ -129,5 +129,7 @@ class StratumApi {
+     // Resets the message ID counter.
+     void resetUid();
+-
++
++    void reserveOptionalSetupIds();
++
+     // clear the message buffer
+     void clearBuffer();
+diff --git a/main/stratum/stratum_config.cpp b/main/stratum/stratum_config.cpp
+index 76592764..425f526f 100644
+--- a/main/stratum/stratum_config.cpp
++++ b/main/stratum/stratum_config.cpp
+@@ -24,6 +24,7 @@ StratumConfig::StratumConfig(int pool)
+         m_port = Config::getStratumPortNumber();
+         m_user = Config::getStratumUser();
+         m_password = Config::getStratumPass();
++        m_difficulty = Config::getStratumDifficulty();
+         m_enonceSub = Config::isStratumEnonceSubscribe();
+         m_tls = Config::isStratumTLS();
+         m_protocol = (StratumProtocol) Config::getStratumProtocol();
+@@ -33,6 +34,7 @@ StratumConfig::StratumConfig(int pool)
+         m_port = Config::getStratumFallbackPortNumber();
+         m_user = Config::getStratumFallbackUser();
+         m_password = Config::getStratumFallbackPass();
++        m_difficulty = Config::getStratumFallbackDifficulty();
+         m_enonceSub = Config::isStratumFallbackEnonceSubscribe();
+         m_tls = Config::isStratumFallbackTLS();
+         m_protocol = (StratumProtocol) Config::getFallbackStratumProtocol();
+@@ -46,6 +48,7 @@ bool StratumConfig::reload()
+     int newPort   = m_primary ? Config::getStratumPortNumber() : Config::getStratumFallbackPortNumber();
+     char *newUser = m_primary ? Config::getStratumUser() : Config::getStratumFallbackUser();
+     char *newPass = m_primary ? Config::getStratumPass() : Config::getStratumFallbackPass();
++    double newDifficulty = m_primary ? Config::getStratumDifficulty() : Config::getStratumFallbackDifficulty();
+     bool newEnsub = m_primary ? Config::isStratumEnonceSubscribe() : Config::isStratumFallbackEnonceSubscribe();
+     bool newTLS   = m_primary ? Config::isStratumTLS() : Config::isStratumFallbackTLS();
+     StratumProtocol newProto = (StratumProtocol)(m_primary ? Config::getStratumProtocol() : Config::getFallbackStratumProtocol());
+@@ -55,6 +58,7 @@ bool StratumConfig::reload()
+         m_port == newPort &&
+         strEq(m_user, newUser) &&
+         strEq(m_password, newPass) &&
++        m_difficulty == newDifficulty &&
+         m_enonceSub == newEnsub &&
+         m_tls == newTLS &&
+         m_protocol == newProto;
+@@ -76,6 +80,7 @@ bool StratumConfig::reload()
+     m_port       = newPort;
+     m_user       = newUser;
+     m_password   = newPass;
++    m_difficulty = newDifficulty;
+     m_enonceSub  = newEnsub;
+     m_tls        = newTLS;
+     m_protocol   = newProto;
+@@ -94,6 +99,7 @@ void StratumConfig::copyInto(StratumConfig *dst)
+     dst->m_port      = m_port;
+     dst->m_user      = m_user ? strdup(m_user) : nullptr;
+     dst->m_password  = m_password ? strdup(m_password) : nullptr;
++    dst->m_difficulty = m_difficulty;
+     dst->m_enonceSub = m_enonceSub;
+     dst->m_tls       = m_tls;
+     dst->m_protocol  = m_protocol;
+@@ -109,4 +115,4 @@ void StratumConfig::toLog(const StratumConfig &cfg, const char* prefix) {
+     ESP_LOGE(TAG, "%s [%c] pass: %s", prefix, c, cfg.m_password ? cfg.m_password : "null");
+     ESP_LOGE(TAG, "%s [%c] esub:  %s", prefix, c, cfg.m_enonceSub ? "true" : "false");
+ }
+-*/
+\ No newline at end of file
++*/
+diff --git a/main/stratum/stratum_config.h b/main/stratum/stratum_config.h
+index b55540a4..5a78833f 100644
+--- a/main/stratum/stratum_config.h
++++ b/main/stratum/stratum_config.h
+@@ -20,6 +20,7 @@ class StratumConfig {
+     int m_port = 0;
+     char *m_user = nullptr;
+     char *m_password = nullptr;
++    double m_difficulty = 1.0;
+     bool m_enonceSub = false;
+     bool m_tls = false;
+     StratumProtocol m_protocol = STRATUM_V1;
+@@ -62,6 +63,11 @@ class StratumConfig {
+         return m_password;
+     }
+
++    double getDifficulty()
++    {
++        return m_difficulty;
++    }
++
+     bool isEnonceSubscribeEnabled()
+     {
+         return m_enonceSub;
+@@ -81,4 +87,3 @@ class StratumConfig {
+
+     //static void toLog(const StratumConfig &cfg, const char* prefix="");
+ };
+-
+diff --git a/main/stratum/stratum_manager.cpp b/main/stratum/stratum_manager.cpp
+index dfcb27f4..77d6e9ff 100644
+--- a/main/stratum/stratum_manager.cpp
++++ b/main/stratum/stratum_manager.cpp
+@@ -185,7 +185,7 @@ void StratumManager::dispatch(int pool, JsonDocument &doc)
+     }
+
+     case MINING_SET_DIFFICULTY: {
+-        setPoolDifficulty(pool, (uint32_t) m_stratum_api_v1_message.new_difficulty);
++        setPoolDifficulty(pool, m_stratum_api_v1_message.new_difficulty);
+         if (create_job_set_difficulty(pool, m_stratum_api_v1_message.new_difficulty)) {
+             ESP_LOGI(tag, "Set stratum difficulty: %.6f", m_stratum_api_v1_message.new_difficulty);
+         }
+diff --git a/main/stratum/stratum_manager.h b/main/stratum/stratum_manager.h
+index b5f52642..a8afaa4a 100644
+--- a/main/stratum/stratum_manager.h
++++ b/main/stratum/stratum_manager.h
+@@ -93,7 +93,7 @@ class StratumManager {
+
+     virtual void acceptedShare(int pool) = 0;
+     virtual void rejectedShare(int pool) = 0;
+-    virtual void setPoolDifficulty(int pool, uint32_t diff) = 0;
++    virtual void setPoolDifficulty(int pool, double diff) = 0;
+     virtual void setNetworkDifficulty(int pool, uint32_t nbits) {}
+
+     virtual int getPoolMode() = 0;
+@@ -171,7 +171,7 @@ class StratumManager {
+
+     virtual int getPoolErrors() = 0;
+
+-    virtual uint32_t getPoolDifficulty() = 0;
++    virtual double getPoolDifficulty() = 0;
+     virtual double getNetworkDifficulty() { return 0; }
+
+     virtual int getCompatPingPoolIndex() = 0;
+diff --git a/main/stratum/stratum_manager_dual_pool.h b/main/stratum/stratum_manager_dual_pool.h
+index 44cf56bd..120a869f 100644
+--- a/main/stratum/stratum_manager_dual_pool.h
++++ b/main/stratum/stratum_manager_dual_pool.h
+@@ -14,7 +14,7 @@ class StratumManagerDualPool : public StratumManager {
+     uint64_t m_rejected[2]{};
+     uint64_t m_bestSessionDiff[2]{};
+     bool m_poolDiffErr[2]{};
+-    uint32_t m_poolDifficulty[2]{0};
++    double m_poolDifficulty[2]{0};
+     double m_networkDifficulty[2]{0};
+
+     virtual void reconnectTimerCallback(int index);
+@@ -23,7 +23,7 @@ class StratumManagerDualPool : public StratumManager {
+
+     virtual bool acceptsNotifyFrom(int pool);
+
+-    virtual void setPoolDifficulty(int pool, uint32_t diff) {
++    virtual void setPoolDifficulty(int pool, double diff) {
+         m_poolDifficulty[pool] = diff;
+     };
+
+@@ -89,7 +89,7 @@ class StratumManagerDualPool : public StratumManager {
+         return m_rejected[0] + m_rejected[1];
+     }
+
+-    virtual uint32_t getPoolDifficulty() {
++    virtual double getPoolDifficulty() {
+         return (m_balance >= 50) ? m_poolDifficulty[0] : m_poolDifficulty[1];
+     };
+
+diff --git a/main/stratum/stratum_manager_fallback.h b/main/stratum/stratum_manager_fallback.h
+index 9c702ad7..ea95d05b 100644
+--- a/main/stratum/stratum_manager_fallback.h
++++ b/main/stratum/stratum_manager_fallback.h
+@@ -10,7 +10,7 @@ class StratumManagerFallback : public StratumManager {
+     int m_selected = 0;
+     uint64_t m_accepted = 0;
+     uint64_t m_rejected = 0;
+-    uint32_t m_poolDifficulty = 0;
++    double m_poolDifficulty = 0;
+     double m_networkDifficulty = 0;
+     uint64_t m_bestSessionDiff = 0;
+
+@@ -20,7 +20,7 @@ class StratumManagerFallback : public StratumManager {
+
+     virtual bool acceptsNotifyFrom(int pool);
+
+-    virtual void setPoolDifficulty(int pool, uint32_t diff) {
++    virtual void setPoolDifficulty(int pool, double diff) {
+         m_poolDifficulty = diff;
+     };
+
+@@ -72,7 +72,7 @@ class StratumManagerFallback : public StratumManager {
+         return m_rejected;
+     }
+
+-    virtual uint32_t getPoolDifficulty() {
++    virtual double getPoolDifficulty() {
+         return m_poolDifficulty;
+     };
+
+diff --git a/main/stratum/stratum_task.cpp b/main/stratum/stratum_task.cpp
+index 2f945adb..670c5dd4 100644
+--- a/main/stratum/stratum_task.cpp
++++ b/main/stratum/stratum_task.cpp
+@@ -364,13 +364,19 @@ void StratumTaskV1::protocolLoop()
+     success = success && m_stratumAPI.authenticate(m_transport, m_config->getUser(), m_config->getPassword());
+
+     // mining.suggest_difficulty - ID: 4
+-    success = success && m_stratumAPI.suggestDifficulty(m_transport, Config::getStratumDifficulty());
++    success = success && m_stratumAPI.suggestDifficulty(m_transport, m_config->getDifficulty());
+
+     // mining.mining.extranonce.subscribe - ID 5
+     if (m_config->isEnonceSubscribeEnabled()) {
+         success = success && m_stratumAPI.entranonceSubscribe(m_transport);
+     }
+-
++
++#ifdef VIRTUALAXE_GAMMA
++    if (!m_config->isEnonceSubscribeEnabled()) {
++        m_stratumAPI.reserveOptionalSetupIds();
++    }
++#endif
++
+     if (!success) {
+         ESP_LOGE(m_tag, "Error sending Stratum setup commands!");
+         return;
+diff --git a/main/tasks/create_jobs_task.cpp b/main/tasks/create_jobs_task.cpp
+index ad39f2bd..f4bc81da 100644
+--- a/main/tasks/create_jobs_task.cpp
++++ b/main/tasks/create_jobs_task.cpp
+@@ -106,7 +106,12 @@ class MiningInfoV1 : public MiningInfoBase {
+
+     bool isValid() const override
+     {
+-        return current_job->ntime != 0;
++        return current_job->ntime != 0
++            && current_job->job_id
++            && current_job->coinbase_1
++            && current_job->coinbase_2
++            && extranonce_str
++            && extranonce_2_len > 0;
+     }
+
+     bool isNewWork(uint32_t &last_ntime) const override
+--
+2.50.1 (Apple Git-155)

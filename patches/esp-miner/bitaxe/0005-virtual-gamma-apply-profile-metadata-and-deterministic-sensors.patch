@@ -1,0 +1,338 @@
+From 87dc3cf3b6f8bc64fa35cc99529e996b95ff94ac Mon Sep 17 00:00:00 2001
+From: virtualAxe <virtualaxe@example.invalid>
+Date: Wed, 6 May 2026 12:37:20 +0200
+Subject: [PATCH 05/13] virtual gamma: apply profile metadata and sensors
+
+Why: make the virtual firmware report the configured Gamma profile and stable
+virtual sensor values expected by AxeOS and API clients.
+Virtual-only: virtual ASIC worker metadata and deterministic thermal values are
+active only for CONFIG_BITAXE_VIRTUAL builds.
+Upstream surface: device configuration, virtual ASIC status, HTTP system info,
+and thermal readings.
+Verify: run API system-info tests, browser/dashboard smoke, and make build.
+Removal impact: AxeOS and API consumers no longer see a Gamma-shaped virtual
+device with stable telemetry.
+
+---
+ components/asic/include/virtual_asic.h | 10 ++++
+ components/asic/virtual_asic.c         | 21 +++++++++
+ main/device_config.c                   | 48 ++++++++-----------
+ main/http_server/http_server.c         | 19 ++++++++
+ main/thermal/thermal.c                 | 65 ++++++++++++++++++++++----
+ 5 files changed, 125 insertions(+), 38 deletions(-)
+
+diff --git a/components/asic/include/virtual_asic.h b/components/asic/include/virtual_asic.h
+index 5246f45..eca1e9a 100644
+--- a/components/asic/include/virtual_asic.h
++++ b/components/asic/include/virtual_asic.h
+@@ -4,6 +4,14 @@
+ #include "asic_common.h"
+ #include "global_state.h"
+ 
++typedef struct
++{
++    uint8_t asic_nr;
++    uint8_t lane_offset;
++    uint8_t lane_stride;
++    uint32_t jobs_assigned;
++} virtual_asic_worker_status_t;
++
+ uint8_t VIRTUAL_ASIC_init(GlobalState * GLOBAL_STATE);
+ task_result * VIRTUAL_ASIC_process_work(GlobalState * GLOBAL_STATE);
+ int VIRTUAL_ASIC_set_max_baud(void);
+@@ -13,5 +21,7 @@ void VIRTUAL_ASIC_set_frequency(GlobalState * GLOBAL_STATE);
+ double VIRTUAL_ASIC_get_job_frequency_ms(GlobalState * GLOBAL_STATE);
+ void VIRTUAL_ASIC_read_registers(void);
+ const char * VIRTUAL_ASIC_mode_string(void);
++uint8_t VIRTUAL_ASIC_worker_count(void);
++bool VIRTUAL_ASIC_get_worker_status(uint8_t index, virtual_asic_worker_status_t * out_status);
+ 
+ #endif /* VIRTUAL_ASIC_H_ */
+diff --git a/components/asic/virtual_asic.c b/components/asic/virtual_asic.c
+index 038e9e3..9822dfa 100644
+--- a/components/asic/virtual_asic.c
++++ b/components/asic/virtual_asic.c
+@@ -38,6 +38,7 @@ static QueueHandle_t job_queue = NULL;
+ static QueueHandle_t result_queue = NULL;
+ static TaskHandle_t worker_task_handle = NULL;
+ static task_result result;
++static uint32_t jobs_assigned = 0;
+ static uint8_t next_job_id = 0;
+ static portMUX_TYPE hash_counter_lock = portMUX_INITIALIZER_UNLOCKED;
+ static uint32_t hash_attempt_counter = 0;
+@@ -211,6 +212,7 @@ uint8_t VIRTUAL_ASIC_init(GlobalState * GLOBAL_STATE)
+     if (worker_task_handle == NULL) {
+         xTaskCreatePinnedToCore(virtual_asic_worker, "virtual_asic", 8192, NULL, WORKER_TASK_PRIORITY, &worker_task_handle, WORKER_TASK_CORE);
+     }
++    jobs_assigned = 0;
+     taskENTER_CRITICAL(&hash_counter_lock);
+     hash_attempt_counter = 0;
+     taskEXIT_CRITICAL(&hash_counter_lock);
+@@ -255,6 +257,7 @@ void VIRTUAL_ASIC_send_work(GlobalState * GLOBAL_STATE, void * next_job)
+     pthread_mutex_unlock(&GLOBAL_STATE->valid_jobs_lock);
+ 
+     virtual_job_snapshot_t snapshot;
++    jobs_assigned++;
+     copy_job_snapshot(&snapshot, next_job_id, next_bm_job);
+     xQueueOverwrite(job_queue, &snapshot);
+ }
+@@ -295,3 +298,21 @@ const char * VIRTUAL_ASIC_mode_string(void)
+ {
+     return "cpu";
+ }
++
++uint8_t VIRTUAL_ASIC_worker_count(void)
++{
++    return 1;
++}
++
++bool VIRTUAL_ASIC_get_worker_status(uint8_t index, virtual_asic_worker_status_t * out_status)
++{
++    if (out_status == NULL || index > 0) {
++        return false;
++    }
++
++    out_status->asic_nr = 0;
++    out_status->lane_offset = 0;
++    out_status->lane_stride = 1;
++    out_status->jobs_assigned = jobs_assigned;
++    return true;
++}
+diff --git a/main/device_config.c b/main/device_config.c
+index 7cc1f7c..e400365 100644
+--- a/main/device_config.c
++++ b/main/device_config.c
+@@ -8,37 +8,10 @@
+ 
+ static const char * TAG = "device_config";
+ 
+-#ifdef CONFIG_BITAXE_VIRTUAL
+-static const DeviceConfig virtual_device_config = {
+-    .board_version = "virtual-s3",
+-    .family = {
+-        .id = ULTRA,
+-        .name = "Virtual",
+-        .asic = ASIC_VIRTUAL_CONFIG,
+-        .asic_count = 1,
+-        .max_power = 5,
+-        .power_offset = 0,
+-        .nominal_voltage = 5,
+-        .voltage_domains = 1,
+-        .swarm_color = "gray",
+-    },
+-    .plug_sense = false,
+-    .asic_enable = false,
+-    .power_consumption_target = 1,
+-};
+-#endif
+-
+ esp_err_t device_config_init(void * pvParameters)
+ {
+     GlobalState * GLOBAL_STATE = (GlobalState *) pvParameters;
+-
+-#ifdef CONFIG_BITAXE_VIRTUAL
+-    GLOBAL_STATE->DEVICE_CONFIG = virtual_device_config;
+-    ESP_LOGI(TAG, "Device Model: %s", GLOBAL_STATE->DEVICE_CONFIG.family.name);
+-    ESP_LOGI(TAG, "Board Version: %s", GLOBAL_STATE->DEVICE_CONFIG.board_version);
+-    ESP_LOGI(TAG, "ASIC: %dx %s (%d cores)", GLOBAL_STATE->DEVICE_CONFIG.family.asic_count, GLOBAL_STATE->DEVICE_CONFIG.family.asic.name, GLOBAL_STATE->DEVICE_CONFIG.family.asic.core_count);
+-    return ESP_OK;
+-#endif
++    bool family_resolved = false;
+ 
+     // TODO: Read board version from eFuse
+ 
+@@ -66,6 +39,7 @@ esp_err_t device_config_init(void * pvParameters)
+     for (int i = 0 ; i < ARRAY_SIZE(default_families); i++) {
+         if (strcasecmp(default_families[i].name, device_model) == 0) {
+             GLOBAL_STATE->DEVICE_CONFIG.family = default_families[i];
++            family_resolved = true;
+ 
+             ESP_LOGI(TAG, "Device Model: %s", GLOBAL_STATE->DEVICE_CONFIG.family.name);
+ 
+@@ -77,7 +51,10 @@ esp_err_t device_config_init(void * pvParameters)
+ 
+     for (int i = 0 ; i < ARRAY_SIZE(default_asic_configs); i++) {
+         if (strcasecmp(default_asic_configs[i].name, asic_model) == 0) {
+-            GLOBAL_STATE->DEVICE_CONFIG.family.asic = default_asic_configs[i];
++            bool same_family_asic = family_resolved && strcasecmp(GLOBAL_STATE->DEVICE_CONFIG.family.asic.name, asic_model) == 0;
++            if (!same_family_asic) {
++                GLOBAL_STATE->DEVICE_CONFIG.family.asic = default_asic_configs[i];
++            }
+ 
+             ESP_LOGI(TAG, "ASIC: %dx %s (%d cores)", GLOBAL_STATE->DEVICE_CONFIG.family.asic_count, GLOBAL_STATE->DEVICE_CONFIG.family.asic.name, GLOBAL_STATE->DEVICE_CONFIG.family.asic.core_count);
+ 
+@@ -102,6 +79,19 @@ esp_err_t device_config_init(void * pvParameters)
+     // test values
+     GLOBAL_STATE->DEVICE_CONFIG.power_consumption_target = nvs_config_get_u16(NVS_CONFIG_POWER_CONSUMPTION_TARGET);
+ 
++#ifdef CONFIG_BITAXE_VIRTUAL
++    if (strncmp(GLOBAL_STATE->DEVICE_CONFIG.board_version, "virtual-", strlen("virtual-")) == 0) {
++        GLOBAL_STATE->DEVICE_CONFIG.family.asic.id = ASIC_VIRTUAL;
++        ESP_LOGI(
++            TAG,
++            "Virtual ASIC backend enabled for %s (%dx %s)",
++            GLOBAL_STATE->DEVICE_CONFIG.family.name,
++            GLOBAL_STATE->DEVICE_CONFIG.family.asic_count,
++            GLOBAL_STATE->DEVICE_CONFIG.family.asic.name
++        );
++    }
++#endif
++
+     free(board_version);
+     free(device_model);
+     free(asic_model);
+diff --git a/main/http_server/http_server.c b/main/http_server/http_server.c
+index acf0659..0937ff5 100644
+--- a/main/http_server/http_server.c
++++ b/main/http_server/http_server.c
+@@ -971,6 +971,9 @@ static esp_err_t GET_system_info(httpd_req_t * req)
+     }
+ 
+     cJSON_AddNumberToObject(root, "uptimeSeconds", (esp_timer_get_time() - GLOBAL_STATE->SYSTEM_MODULE.start_time) / 1000000);
++    cJSON_AddStringToObject(root, "deviceModel", GLOBAL_STATE->DEVICE_CONFIG.family.name);
++    cJSON_AddNumberToObject(root, "asicCount", GLOBAL_STATE->DEVICE_CONFIG.family.asic_count);
++    cJSON_AddNumberToObject(root, "hashDomains", GLOBAL_STATE->DEVICE_CONFIG.family.asic.hash_domains);
+     cJSON_AddNumberToObject(root, "smallCoreCount", GLOBAL_STATE->DEVICE_CONFIG.family.asic.small_core_count);
+     cJSON_AddStringToObject(root, "ASICModel", GLOBAL_STATE->DEVICE_CONFIG.family.asic.name);
+     cJSON_AddStringToObject(root, "stratumURL", stratumURL);
+@@ -1004,8 +1007,24 @@ static esp_err_t GET_system_info(httpd_req_t * req)
+     cJSON_AddStringToObject(root, "networkType", connect_get_network_type());
+ #ifdef CONFIG_BITAXE_VIRTUAL
+     cJSON_AddStringToObject(root, "virtualAsicMode", VIRTUAL_ASIC_mode_string());
++    cJSON *virtual_workers = cJSON_CreateArray();
++    cJSON_AddItemToObject(root, "virtualAsicWorkers", virtual_workers);
++    for (uint8_t worker_index = 0; worker_index < VIRTUAL_ASIC_worker_count(); worker_index++) {
++        virtual_asic_worker_status_t worker_status;
++        if (!VIRTUAL_ASIC_get_worker_status(worker_index, &worker_status)) {
++            continue;
++        }
++
++        cJSON *worker = cJSON_CreateObject();
++        cJSON_AddItemToArray(virtual_workers, worker);
++        cJSON_AddNumberToObject(worker, "asicNr", worker_status.asic_nr);
++        cJSON_AddNumberToObject(worker, "laneOffset", worker_status.lane_offset);
++        cJSON_AddNumberToObject(worker, "laneStride", worker_status.lane_stride);
++        cJSON_AddNumberToObject(worker, "jobsAssigned", worker_status.jobs_assigned);
++    }
+ #else
+     cJSON_AddStringToObject(root, "virtualAsicMode", "");
++    cJSON_AddItemToObject(root, "virtualAsicWorkers", cJSON_CreateArray());
+ #endif
+ 
+     cJSON_AddStringToObject(root, "idfVersion", esp_get_idf_version());
+diff --git a/main/thermal/thermal.c b/main/thermal/thermal.c
+index 0d1db41..d866c52 100644
+--- a/main/thermal/thermal.c
++++ b/main/thermal/thermal.c
+@@ -10,10 +10,56 @@
+ 
+ static const char * TAG = "thermal";
+ 
++#ifdef CONFIG_BITAXE_VIRTUAL
++static float virtual_fan_percent = 100.0f;
++static uint16_t virtual_fan_rpm = 3600;
++static uint16_t virtual_fan2_rpm = 0;
++static float virtual_chip_temp = 40.0f;
++static float virtual_chip_temp2 = 0.0f;
++
++static float clamp_float(float value, float min_value, float max_value)
++{
++    if (value < min_value) {
++        return min_value;
++    }
++    if (value > max_value) {
++        return max_value;
++    }
++    return value;
++}
++
++static void update_virtual_thermal_state(const GlobalState * GLOBAL_STATE)
++{
++    float frequency = GLOBAL_STATE->POWER_MANAGEMENT_MODULE.actual_frequency;
++    if (frequency <= 0.0f) {
++        frequency = GLOBAL_STATE->POWER_MANAGEMENT_MODULE.frequency_value;
++    }
++    if (frequency <= 0.0f) {
++        frequency = GLOBAL_STATE->DEVICE_CONFIG.family.asic.default_frequency_mhz;
++    }
++
++    float core_voltage_mv = GLOBAL_STATE->POWER_MANAGEMENT_MODULE.core_voltage;
++    if (core_voltage_mv <= 0.0f) {
++        core_voltage_mv = GLOBAL_STATE->DEVICE_CONFIG.family.asic.default_voltage_mv;
++    }
++
++    float cooling = clamp_float(virtual_fan_percent, 0.0f, 100.0f) * 0.08f;
++    float workload_heat = 34.0f + ((frequency - 300.0f) / 50.0f) * 1.2f + ((core_voltage_mv - 1000.0f) / 100.0f) * 1.5f;
++    virtual_chip_temp = clamp_float(workload_heat - cooling, 32.0f, 95.0f);
++    virtual_chip_temp2 = GLOBAL_STATE->DEVICE_CONFIG.family.asic_count > 1 ? clamp_float(virtual_chip_temp + 1.5f, 33.0f, 97.0f) : 0.0f;
++    virtual_fan_rpm = virtual_fan_percent > 0.0f ? (uint16_t)(1200.0f + (virtual_fan_percent * 24.0f)) : 0;
++    virtual_fan2_rpm = GLOBAL_STATE->DEVICE_CONFIG.family.asic_count > 1 ? virtual_fan_rpm : 0;
++}
++#endif
++
+ esp_err_t Thermal_init(DeviceConfig * DEVICE_CONFIG)
+ {
+ #ifdef CONFIG_BITAXE_VIRTUAL
+-    (void)DEVICE_CONFIG;
++    virtual_fan_percent = 100.0f;
++    virtual_fan_rpm = 3600;
++    virtual_fan2_rpm = DEVICE_CONFIG->family.asic_count > 1 ? virtual_fan_rpm : 0;
++    virtual_chip_temp = 40.0f;
++    virtual_chip_temp2 = DEVICE_CONFIG->family.asic_count > 1 ? 41.5f : 0.0f;
+     return ESP_OK;
+ #endif
+ 
+@@ -44,7 +90,9 @@ esp_err_t Thermal_set_fan_percent(DeviceConfig * DEVICE_CONFIG, float percent)
+ {
+ #ifdef CONFIG_BITAXE_VIRTUAL
+     (void)DEVICE_CONFIG;
+-    (void)percent;
++    virtual_fan_percent = clamp_float(percent * 100.0f, 0.0f, 100.0f);
++    virtual_fan_rpm = virtual_fan_percent > 0.0f ? (uint16_t)(1200.0f + (virtual_fan_percent * 24.0f)) : 0;
++    virtual_fan2_rpm = DEVICE_CONFIG->family.asic_count > 1 ? virtual_fan_rpm : 0;
+     return ESP_OK;
+ #endif
+ 
+@@ -64,7 +112,7 @@ uint16_t Thermal_get_fan_speed(DeviceConfig * DEVICE_CONFIG)
+ {
+ #ifdef CONFIG_BITAXE_VIRTUAL
+     (void)DEVICE_CONFIG;
+-    return 0;
++    return virtual_fan_rpm;
+ #endif
+ 
+     if (DEVICE_CONFIG->EMC2101) {
+@@ -82,8 +130,7 @@ uint16_t Thermal_get_fan_speed(DeviceConfig * DEVICE_CONFIG)
+ uint16_t Thermal_get_fan2_speed(DeviceConfig * DEVICE_CONFIG) 
+ {
+ #ifdef CONFIG_BITAXE_VIRTUAL
+-    (void)DEVICE_CONFIG;
+-    return 0;
++    return DEVICE_CONFIG->family.asic_count > 1 ? virtual_fan2_rpm : 0;
+ #endif
+ 
+     if (DEVICE_CONFIG->EMC2302) {
+@@ -95,8 +142,8 @@ uint16_t Thermal_get_fan2_speed(DeviceConfig * DEVICE_CONFIG)
+ float Thermal_get_chip_temp(GlobalState * GLOBAL_STATE)
+ {
+ #ifdef CONFIG_BITAXE_VIRTUAL
+-    (void)GLOBAL_STATE;
+-    return 40.0f;
++    update_virtual_thermal_state(GLOBAL_STATE);
++    return virtual_chip_temp;
+ #endif
+ 
+     if (!GLOBAL_STATE->ASIC_initalized) {
+@@ -122,8 +169,8 @@ float Thermal_get_chip_temp(GlobalState * GLOBAL_STATE)
+ float Thermal_get_chip_temp2(GlobalState * GLOBAL_STATE)
+ {
+ #ifdef CONFIG_BITAXE_VIRTUAL
+-    (void)GLOBAL_STATE;
+-    return 0.0f;
++    update_virtual_thermal_state(GLOBAL_STATE);
++    return GLOBAL_STATE->DEVICE_CONFIG.family.asic_count > 1 ? virtual_chip_temp2 : 0.0f;
+ #endif
+ 
+     if (!GLOBAL_STATE->ASIC_initalized) {
+-- 
+2.50.1 (Apple Git-155)

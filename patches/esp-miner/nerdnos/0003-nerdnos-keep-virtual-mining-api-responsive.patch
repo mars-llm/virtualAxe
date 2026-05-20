@@ -1,0 +1,220 @@
+From 9198c2c6a673d4ef799d5da480297cc19f8c2e43 Mon Sep 17 00:00:00 2001
+From: virtualAxe <virtualaxe@example.invalid>
+Date: Mon, 11 May 2026 12:21:38 +0200
+Subject: [PATCH] nerdnos: keep virtual mining api responsive
+
+Why: live NerdNos mining must keep `/api/system/info` responsive while the
+guest virtual ASIC searches a pool job. Re-sending equivalent virtual work on
+every job timer tick causes the guest search to abandon useful nonce ranges
+without improving pool freshness. Real pool notifies must still preempt an
+in-flight virtual search so long qualification runs do not submit work after
+the pool has dropped an old template. The upstream result task polls physical
+ASIC serial state in a tight high-priority loop; the virtual ASIC has a
+non-blocking result queue, so the virtual path must sleep briefly when no result
+is available. The virtual worker stays at the Bitaxe-equivalent priority and
+remains cooperative through bounded yields and queued-work preemption.
+
+Virtual-only: guarded by `VIRTUALAXE_GAMMA`; physical NerdNos boards keep their
+existing periodic ASIC job scheduling.
+
+Upstream surface: NerdNos job scheduler, job descriptor, ASIC result task, and
+virtual ASIC source-specific files only.
+
+Verify: SOURCE=nerdnos make patch-check, SOURCE=nerdnos make verify-submit-replay,
+and make verify-release SOURCE=nerdnos.
+
+Removal impact: live NerdNos sessions can starve useful guest nonce search and
+delay API readiness under active mining.
+---
+ components/bm1397/include/mining.h |  1 +
+ components/bm1397/mining.cpp       |  1 +
+ components/bm1397/virtual_asic.cpp | 12 ++++++++++--
+ main/tasks/asic_result_task.cpp    |  3 +++
+ main/tasks/create_jobs_task.cpp    | 32 ++++++++++++++++++++++++++----
+ 5 files changed, 42 insertions(+), 7 deletions(-)
+
+diff --git a/components/bm1397/include/mining.h b/components/bm1397/include/mining.h
+index 243ff822..3b23e12f 100644
+--- a/components/bm1397/include/mining.h
++++ b/components/bm1397/include/mining.h
+@@ -24,6 +24,7 @@ typedef struct
+     // pool ID
+     int pool_id;
+     uint32_t generation_id;
++    bool force_switch_work;
+
+     char *jobid;
+     char *extranonce2;
+diff --git a/components/bm1397/mining.cpp b/components/bm1397/mining.cpp
+index 4853285a..9a653422 100644
+--- a/components/bm1397/mining.cpp
++++ b/components/bm1397/mining.cpp
+@@ -44,6 +44,7 @@ void construct_bm_job(mining_notify *params, const char *merkle_root, const uint
+     new_job->target = params->target;
+     new_job->ntime = params->ntime;
+     new_job->pool_diff = params->difficulty;
++    new_job->force_switch_work = false;
+
+     hex2bin(merkle_root, new_job->merkle_root, 32);
+
+diff --git a/components/bm1397/virtual_asic.cpp b/components/bm1397/virtual_asic.cpp
+index bc67f429..64f4eb56 100644
+--- a/components/bm1397/virtual_asic.cpp
++++ b/components/bm1397/virtual_asic.cpp
+@@ -82,6 +82,12 @@ static bool test_snapshot_nonce(const virtual_job_snapshot_t *snapshot, uint32_t
+     return false;
+ }
+
++static bool queued_job_should_preempt(const virtual_job_snapshot_t *current)
++{
++    (void) current;
++    return uxQueueMessagesWaiting(s_jobQueue) > 0;
++}
++
+ static bool search_valid_nonce(const virtual_job_snapshot_t *snapshot, uint32_t *out_nonce, uint32_t *out_rolled_version)
+ {
+     uint32_t nonce = snapshot->starting_nonce;
+@@ -97,10 +112,10 @@ static bool search_valid_nonce(const virtual_job_snapshot_t *snapshot, uint32_t
+
+         nonce++;
+         if ((nonce & SEARCH_YIELD_INTERVAL) == 0) {
+-            if (uxQueueMessagesWaiting(s_jobQueue) > 0) {
++            if (queued_job_should_preempt(snapshot)) {
+                 return false;
+             }
+-            vTaskDelay(1);
++            taskYIELD();
+         }
+     }
+ }
+@@ -121,7 +136,7 @@ static void virtual_asic_worker(void *pvParameters)
+             uint32_t nonce = 0;
+             uint32_t rolled_version = snapshot.job.version;
+             if (!search_valid_nonce(&snapshot, &nonce, &rolled_version)) {
+-                if (uxQueueMessagesWaiting(s_jobQueue) > 0) {
++                if (queued_job_should_preempt(&snapshot)) {
+                     break;
+                 }
+                 ESP_LOGW(TAG, "No valid nonce found for virtual job %s", snapshot.jobid);
+diff --git a/main/tasks/asic_result_task.cpp b/main/tasks/asic_result_task.cpp
+index f178428d..e5ecda88 100644
+--- a/main/tasks/asic_result_task.cpp
++++ b/main/tasks/asic_result_task.cpp
+@@ -49,4 +49,7 @@ void ASIC_result_task(void *pvParameters)
+         // get the result
+         if (!asics->processWork(&asic_result)) {
++#ifdef VIRTUALAXE_GAMMA
++            vTaskDelay(pdMS_TO_TICKS(1));
++#endif
+             continue;
+         }
+diff --git a/main/tasks/create_jobs_task.cpp b/main/tasks/create_jobs_task.cpp
+index 4ef7b52d..ad39f2bd 100644
+--- a/main/tasks/create_jobs_task.cpp
++++ b/main/tasks/create_jobs_task.cpp
+@@ -47,6 +47,8 @@ class MiningInfoV1 : public MiningInfoBase {
+
+     double stratum_difficulty = 8192;
+     double active_stratum_difficulty = 8192;
++    bool force_switch_work = false;
++    bool difficulty_changed = false;
+     uint32_t version_mask = 0;
+
+   public:
+@@ -96,6 +98,8 @@ class MiningInfoV1 : public MiningInfoBase {
+         next_job->pool_diff = active_stratum_difficulty;
+         next_job->pool_id = pool_id;
+         next_job->asic_diff = asic_diff;
++        next_job->force_switch_work = force_switch_work || difficulty_changed;
++        difficulty_changed = false;
+
+         return next_job;
+     }
+@@ -111,7 +115,7 @@ class MiningInfoV1 : public MiningInfoBase {
+             last_ntime = current_job->ntime;
+             return true;
+         }
+-        return false;
++        return difficulty_changed;
+     }
+
+     const char* getJobId() const override
+@@ -154,6 +158,10 @@ class MiningInfoV1 : public MiningInfoBase {
+
+         // set difficulty
+         stratum_difficulty = difficulty;
++        if (is_new) {
++            active_stratum_difficulty = difficulty;
++            difficulty_changed = true;
++        }
+         return is_new;
+     }
+
+@@ -173,7 +181,7 @@ class MiningInfoV1 : public MiningInfoBase {
+         next_extranonce_2_len = enonce2_len;
+     }
+
+-    void create_job_mining_notify(mining_notify *notify)
++    void create_job_mining_notify(mining_notify *notify, bool abandonWork)
+     {
+         // do we have a pending extranonce switch?
+         if (next_extranonce_str) {
+@@ -197,6 +205,7 @@ class MiningInfoV1 : public MiningInfoBase {
+
+         // set active difficulty with the mining.notify command
+         active_stratum_difficulty = stratum_difficulty;
++        force_switch_work = abandonWork;
+     }
+ };
+
+@@ -267,7 +276,7 @@ void create_job_mining_notify(int pool, mining_notify *notify, bool abandonWork)
+         if (abandonWork) {
+             asicJobs.cleanJobs(pool);
+         }
+-        ensureV1(pool)->create_job_mining_notify(notify);
++        ensureV1(pool)->create_job_mining_notify(notify, abandonWork);
+     }
+     trigger_job_creation();
+ }
+@@ -308,6 +317,9 @@ void create_jobs_task(void *pvParameters)
+
+     int lastJobInterval = board->getAsicJobIntervalMs();
+
++#ifdef VIRTUALAXE_GAMMA
++    bool virtual_sent_work[2] = {false, false};
++#endif
+     while (1) {
+         if (POWER_MANAGEMENT_MODULE.isShutdown()) {
+             ESP_LOGW(TAG, "suspended");
+@@ -346,9 +358,18 @@ void create_jobs_task(void *pvParameters)
+                 continue;
+             }
+
+-            if (mi->isNewWork(last_ntime[active_pool])) {
++            bool new_work = mi->isNewWork(last_ntime[active_pool]);
++            if (new_work) {
+                 ESP_LOGI(TAG, "(%s) New Work Received %s", active_pool_str, mi->getJobId());
+             }
++#ifdef VIRTUALAXE_GAMMA
++            if (!new_work && virtual_sent_work[active_pool]) {
++                continue;
++            }
++            if (new_work) {
++                virtual_sent_work[active_pool] = false;
++            }
++#endif
+
+             uint32_t asic_diff = STRATUM_MANAGER->selectAsicDiff(active_pool, mi->getActiveDifficulty());
+             next_job = mi->buildBmJob(extranonce_2, active_pool, asic_diff);
+@@ -369,6 +390,9 @@ void create_jobs_task(void *pvParameters)
+
+         // save job
+         asicJobs.storeJob(next_job, asic_job_id);
++#ifdef VIRTUALAXE_GAMMA
++        virtual_sent_work[active_pool] = true;
++#endif
+
+         extranonce_2++;
+     }
+--
+2.50.1 (Apple Git-155)

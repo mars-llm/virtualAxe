@@ -1,0 +1,1361 @@
+From d3ec5390d24939a64017b05c3d2557795e55e491 Mon Sep 17 00:00:00 2001
+From: virtualAxe <virtualaxe@example.invalid>
+Date: Wed, 6 May 2026 12:37:20 +0200
+Subject: [PATCH 01/13] virtual gamma: add qemu firmware foundation
+
+Why: add the QEMU firmware foundation required to boot a virtual Bitaxe Gamma
+with OpenETH networking, virtual ASIC entry points, virtual peripherals, and
+system API metadata.
+Virtual-only: selected by CONFIG_BITAXE_VIRTUAL while physical ASIC and board
+paths keep their upstream behavior.
+Upstream surface: ASIC dispatch, connection setup, Kconfig, HTTP system info,
+main task startup, power, thermal, and hashrate reporting.
+Verify: run make build, python3 scripts/virtualaxe.py verify-test-ci --source
+bitaxe --json, and make verify-submit-replay.
+Removal impact: the virtual Gamma profile cannot boot or expose the
+ESP-Miner-compatible virtual hardware/API path.
+
+---
+ components/asic/CMakeLists.txt                |   1 +
+ components/asic/asic.c                        |  21 ++
+ components/asic/include/virtual_asic.h        |  17 ++
+ components/asic/virtual_asic.c                | 248 ++++++++++++++++++
+ components/connect/CMakeLists.txt             |   2 +
+ components/connect/connect.c                  | 152 +++++++++++
+ components/connect/include/connect.h          |   7 +
+ main/Kconfig.projbuild                        |  16 ++
+ main/device_config.c                          |  28 ++
+ main/device_config.h                          |   7 +-
+ .../axe-os/api/system/asic_settings.c         |  13 +
+ main/http_server/http_server.c                |  34 ++-
+ main/main.c                                   |  21 ++
+ main/power/asic_init.c                        |  16 +-
+ main/power/asic_reset.c                       |   8 +
+ main/power/vcore.c                            |  28 ++
+ main/system.c                                 |  25 ++
+ main/tasks/hashrate_monitor_task.c            |  31 +++
+ main/tasks/stratum_task.c                     |  26 +-
+ main/thermal/thermal.c                        |  31 +++
+ 20 files changed, 708 insertions(+), 24 deletions(-)
+ create mode 100644 components/asic/include/virtual_asic.h
+ create mode 100644 components/asic/virtual_asic.c
+
+diff --git a/components/asic/CMakeLists.txt b/components/asic/CMakeLists.txt
+index d16a645..0440bbc 100644
+--- a/components/asic/CMakeLists.txt
++++ b/components/asic/CMakeLists.txt
+@@ -8,6 +8,7 @@ SRCS
+     "crc.c"
+     "asic_common.c"
+     "asic.c"
++    "virtual_asic.c"
+     "frequency_transition_bmXX.c"
+     "pll.c"
+ 
+diff --git a/components/asic/asic.c b/components/asic/asic.c
+index 523288a..fe2f3cc 100644
+--- a/components/asic/asic.c
++++ b/components/asic/asic.c
+@@ -6,6 +6,7 @@
+ #include "bm1366.h"
+ #include "bm1368.h"
+ #include "bm1370.h"
++#include "virtual_asic.h"
+ 
+ #include "asic.h"
+ #include "device_config.h"
+@@ -28,6 +29,8 @@ uint8_t ASIC_init(GlobalState * GLOBAL_STATE)
+             return BM1368_init(GLOBAL_STATE);
+         case BM1370:
+             return BM1370_init(GLOBAL_STATE);
++        case ASIC_VIRTUAL:
++            return VIRTUAL_ASIC_init(GLOBAL_STATE);
+     }
+     ESP_LOGE(TAG, "Unknown ASIC id %d", GLOBAL_STATE->DEVICE_CONFIG.family.asic.id);
+     return 0;
+@@ -44,6 +47,8 @@ task_result * ASIC_process_work(GlobalState * GLOBAL_STATE)
+             return BM1368_process_work(GLOBAL_STATE);
+         case BM1370:
+             return BM1370_process_work(GLOBAL_STATE);
++        case ASIC_VIRTUAL:
++            return VIRTUAL_ASIC_process_work(GLOBAL_STATE);
+     }
+     ESP_LOGE(TAG, "Unknown ASIC id %d — cannot process work", GLOBAL_STATE->DEVICE_CONFIG.family.asic.id);
+     return NULL;
+@@ -60,6 +65,8 @@ int ASIC_set_max_baud(GlobalState * GLOBAL_STATE)
+             return BM1368_set_max_baud();
+         case BM1370:
+             return BM1370_set_max_baud();
++        case ASIC_VIRTUAL:
++            return VIRTUAL_ASIC_set_max_baud();
+     }
+     ESP_LOGE(TAG, "Unknown ASIC id %d — cannot set max baud", GLOBAL_STATE->DEVICE_CONFIG.family.asic.id);
+     return 0;
+@@ -80,6 +87,9 @@ void ASIC_send_work(GlobalState * GLOBAL_STATE, void * next_job)
+         case BM1370:
+             BM1370_send_work(GLOBAL_STATE, next_job);
+             break;
++        case ASIC_VIRTUAL:
++            VIRTUAL_ASIC_send_work(GLOBAL_STATE, next_job);
++            break;
+         default:
+             ESP_LOGE(TAG, "Unknown ASIC id %d — cannot send work", GLOBAL_STATE->DEVICE_CONFIG.family.asic.id);
+             break;
+@@ -101,6 +111,9 @@ void ASIC_set_version_mask(GlobalState * GLOBAL_STATE, uint32_t mask)
+         case BM1370:
+             BM1370_set_version_mask(mask);
+             break;
++        case ASIC_VIRTUAL:
++            VIRTUAL_ASIC_set_version_mask(mask);
++            break;
+         default:
+             ESP_LOGE(TAG, "Unknown ASIC id %d — cannot set version mask", GLOBAL_STATE->DEVICE_CONFIG.family.asic.id);
+             break;
+@@ -122,6 +135,9 @@ void ASIC_set_frequency(GlobalState * GLOBAL_STATE)
+         case BM1370:
+             do_frequency_transition(GLOBAL_STATE, BM1370_send_hash_frequency);
+             return;
++        case ASIC_VIRTUAL:
++            VIRTUAL_ASIC_set_frequency(GLOBAL_STATE);
++            return;
+     }
+     ESP_LOGE(TAG, "Unknown ASIC id %d — cannot set frequency", GLOBAL_STATE->DEVICE_CONFIG.family.asic.id);
+ }
+@@ -131,2 +147,4 @@ double ASIC_get_asic_job_frequency_ms(GlobalState * GLOBAL_STATE)
+     switch (GLOBAL_STATE->DEVICE_CONFIG.family.asic.id) {
++        case ASIC_VIRTUAL:
++            return VIRTUAL_ASIC_get_job_frequency_ms(GLOBAL_STATE);
+         case BM1397:
+@@ -157,6 +175,9 @@ void ASIC_read_registers(GlobalState * GLOBAL_STATE)
+         case BM1370:
+             BM1370_read_registers();
+             break;
++        case ASIC_VIRTUAL:
++            VIRTUAL_ASIC_read_registers();
++            break;
+         default:
+             ESP_LOGE(TAG, "Unknown ASIC id %d — cannot read registers", GLOBAL_STATE->DEVICE_CONFIG.family.asic.id);
+             break;
+diff --git a/components/asic/include/virtual_asic.h b/components/asic/include/virtual_asic.h
+new file mode 100644
+index 0000000..5246f45
+--- /dev/null
++++ b/components/asic/include/virtual_asic.h
+@@ -0,0 +1,17 @@
++#ifndef VIRTUAL_ASIC_H_
++#define VIRTUAL_ASIC_H_
++
++#include "asic_common.h"
++#include "global_state.h"
++
++uint8_t VIRTUAL_ASIC_init(GlobalState * GLOBAL_STATE);
++task_result * VIRTUAL_ASIC_process_work(GlobalState * GLOBAL_STATE);
++int VIRTUAL_ASIC_set_max_baud(void);
++void VIRTUAL_ASIC_send_work(GlobalState * GLOBAL_STATE, void * next_job);
++void VIRTUAL_ASIC_set_version_mask(uint32_t mask);
++void VIRTUAL_ASIC_set_frequency(GlobalState * GLOBAL_STATE);
++double VIRTUAL_ASIC_get_job_frequency_ms(GlobalState * GLOBAL_STATE);
++void VIRTUAL_ASIC_read_registers(void);
++const char * VIRTUAL_ASIC_mode_string(void);
++
++#endif /* VIRTUAL_ASIC_H_ */
+diff --git a/components/asic/virtual_asic.c b/components/asic/virtual_asic.c
+new file mode 100644
+index 0000000..ef10ade
+--- /dev/null
++++ b/components/asic/virtual_asic.c
+@@ -0,0 +1,248 @@
++#include <inttypes.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <string.h>
++
++#include "esp_log.h"
++#include "esp_timer.h"
++#include "freertos/FreeRTOS.h"
++#include "freertos/queue.h"
++#include "freertos/task.h"
++
++#include "mining.h"
++#include "virtual_asic.h"
++
++typedef struct
++{
++    uint8_t job_id;
++    uint32_t version;
++    uint32_t version_mask;
++    uint8_t prev_block_hash[32];
++    uint8_t merkle_root[32];
++    uint32_t ntime;
++    uint32_t target;
++    uint32_t starting_nonce;
++    double pool_diff;
++    char jobid[96];
++} virtual_job_snapshot_t;
++
++static const char * TAG = "virtual_asic";
++
++static QueueHandle_t job_queue = NULL;
++static QueueHandle_t result_queue = NULL;
++static TaskHandle_t worker_task_handle = NULL;
++static task_result result;
++static uint8_t next_job_id = 0;
++static portMUX_TYPE hash_counter_lock = portMUX_INITIALIZER_UNLOCKED;
++static uint32_t hash_attempt_counter = 0;
++
++static void virtual_record_hash_attempts(uint32_t attempts)
++{
++    if (attempts == 0) {
++        return;
++    }
++
++    taskENTER_CRITICAL(&hash_counter_lock);
++    hash_attempt_counter += attempts;
++    taskEXIT_CRITICAL(&hash_counter_lock);
++}
++
++static uint32_t virtual_hash_attempt_count(void)
++{
++    taskENTER_CRITICAL(&hash_counter_lock);
++    uint32_t value = hash_attempt_counter;
++    taskEXIT_CRITICAL(&hash_counter_lock);
++    return value;
++}
++
++static bool virtual_job_test_nonce(const virtual_job_snapshot_t * snapshot, uint32_t nonce, uint32_t * rolled_version, uint32_t * attempts)
++{
++    bm_job job = {0};
++    job.version = snapshot->version;
++    job.version_mask = snapshot->version_mask;
++    memcpy(job.prev_block_hash, snapshot->prev_block_hash, sizeof(job.prev_block_hash));
++    memcpy(job.merkle_root, snapshot->merkle_root, sizeof(job.merkle_root));
++    job.ntime = snapshot->ntime;
++    job.target = snapshot->target;
++    job.pool_diff = snapshot->pool_diff;
++
++    (*attempts)++;
++    *rolled_version = snapshot->version;
++    return test_nonce_value(&job, nonce, *rolled_version) >= snapshot->pool_diff;
++}
++
++static bool search_valid_nonce(const virtual_job_snapshot_t * snapshot, uint32_t * out_nonce, uint32_t * rolled_version)
++{
++    uint32_t nonce = snapshot->starting_nonce;
++    uint32_t attempts_since_flush = 0;
++    while (true) {
++        if (virtual_job_test_nonce(snapshot, nonce, rolled_version, &attempts_since_flush)) {
++            *out_nonce = nonce;
++            virtual_record_hash_attempts(attempts_since_flush);
++            return true;
++        }
++
++        if (nonce == UINT32_MAX) {
++            virtual_record_hash_attempts(attempts_since_flush);
++            return false;
++        }
++
++        nonce++;
++        if ((nonce & 0xFFFF) == 0) {
++            virtual_record_hash_attempts(attempts_since_flush);
++            attempts_since_flush = 0;
++            vTaskDelay(1 / portTICK_PERIOD_MS);
++        }
++    }
++}
++
++static void virtual_asic_worker(void * pvParameters)
++{
++    (void)pvParameters;
++
++    virtual_job_snapshot_t snapshot;
++    while (1) {
++        if (xQueueReceive(job_queue, &snapshot, portMAX_DELAY) != pdTRUE) {
++            continue;
++        }
++
++        uint32_t nonce = 0;
++        uint32_t rolled_version = snapshot.version;
++        if (!search_valid_nonce(&snapshot, &nonce, &rolled_version)) {
++            ESP_LOGW(TAG, "No valid nonce found for virtual job %s", snapshot.jobid);
++            continue;
++        }
++
++        task_result found = {
++            .job_id = snapshot.job_id,
++            .nonce = nonce,
++            .rolled_version = rolled_version,
++            .register_type = REGISTER_INVALID,
++            .asic_nr = 0,
++            .core_id = 0,
++            .small_core_id = 0,
++            .timestamp_us = esp_timer_get_time(),
++        };
++
++        if (xQueueSend(result_queue, &found, 0) != pdTRUE) {
++            task_result discarded;
++            xQueueReceive(result_queue, &discarded, 0);
++            xQueueSend(result_queue, &found, 0);
++        }
++    }
++}
++
++static void copy_job_snapshot(virtual_job_snapshot_t * snapshot, uint8_t job_id, const bm_job * source)
++{
++    memset(snapshot, 0, sizeof(*snapshot));
++    snapshot->job_id = job_id;
++    snapshot->version = source->version;
++    snapshot->version_mask = source->version_mask;
++    snapshot->ntime = source->ntime;
++    snapshot->target = source->target;
++    snapshot->starting_nonce = source->starting_nonce;
++    snapshot->pool_diff = source->pool_diff;
++    memcpy(snapshot->prev_block_hash, source->prev_block_hash, sizeof(snapshot->prev_block_hash));
++    memcpy(snapshot->merkle_root, source->merkle_root, sizeof(snapshot->merkle_root));
++    if (source->jobid != NULL) {
++        strncpy(snapshot->jobid, source->jobid, sizeof(snapshot->jobid) - 1);
++    }
++}
++
++uint8_t VIRTUAL_ASIC_init(GlobalState * GLOBAL_STATE)
++{
++    (void)GLOBAL_STATE;
++
++    if (job_queue == NULL) {
++        job_queue = xQueueCreate(1, sizeof(virtual_job_snapshot_t));
++    }
++    if (result_queue == NULL) {
++        result_queue = xQueueCreate(8, sizeof(task_result));
++    }
++    if (worker_task_handle == NULL) {
++        xTaskCreate(virtual_asic_worker, "virtual_asic", 8192, NULL, 8, &worker_task_handle);
++    }
++    taskENTER_CRITICAL(&hash_counter_lock);
++    hash_attempt_counter = 0;
++    taskEXIT_CRITICAL(&hash_counter_lock);
++
++    ESP_LOGI(TAG, "Virtual ASIC backend ready (%s mode)", VIRTUAL_ASIC_mode_string());
++    return 1;
++}
++
++task_result * VIRTUAL_ASIC_process_work(GlobalState * GLOBAL_STATE)
++{
++    (void)GLOBAL_STATE;
++
++    if (result_queue == NULL) {
++        return NULL;
++    }
++
++    if (xQueueReceive(result_queue, &result, 0) != pdTRUE) {
++        return NULL;
++    }
++
++    return &result;
++}
++
++int VIRTUAL_ASIC_set_max_baud(void)
++{
++    return 115200;
++}
++
++void VIRTUAL_ASIC_send_work(GlobalState * GLOBAL_STATE, void * next_job)
++{
++    bm_job * next_bm_job = (bm_job *)next_job;
++    next_job_id = (uint8_t)((next_job_id + 1) % 128);
++
++    if (GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[next_job_id] != NULL) {
++        free_bm_job(GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[next_job_id]);
++    }
++
++    GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[next_job_id] = next_bm_job;
++
++    pthread_mutex_lock(&GLOBAL_STATE->valid_jobs_lock);
++    GLOBAL_STATE->valid_jobs[next_job_id] = 1;
++    pthread_mutex_unlock(&GLOBAL_STATE->valid_jobs_lock);
++
++    virtual_job_snapshot_t snapshot;
++    copy_job_snapshot(&snapshot, next_job_id, next_bm_job);
++    xQueueOverwrite(job_queue, &snapshot);
++}
++
++void VIRTUAL_ASIC_set_version_mask(uint32_t mask)
++{
++    ESP_LOGI(TAG, "Ignoring virtual version mask update: %08" PRIx32, mask);
++}
++
++void VIRTUAL_ASIC_set_frequency(GlobalState * GLOBAL_STATE)
++{
++    GLOBAL_STATE->POWER_MANAGEMENT_MODULE.actual_frequency = GLOBAL_STATE->POWER_MANAGEMENT_MODULE.frequency_value;
++}
++
++double VIRTUAL_ASIC_get_job_frequency_ms(GlobalState * GLOBAL_STATE)
++{
++    (void)GLOBAL_STATE;
++
++    return 1000.0;
++}
++
++void VIRTUAL_ASIC_read_registers(void)
++{
++    if (result_queue == NULL) {
++        return;
++    }
++
++    task_result sample = {
++        .register_type = REGISTER_TOTAL_COUNT,
++        .asic_nr = 0,
++        .value = virtual_hash_attempt_count(),
++        .timestamp_us = esp_timer_get_time(),
++    };
++    xQueueSend(result_queue, &sample, 0);
++}
++
++const char * VIRTUAL_ASIC_mode_string(void)
++{
++    return "cpu";
++}
+diff --git a/components/connect/CMakeLists.txt b/components/connect/CMakeLists.txt
+index 91e85c3..dc7aeb5 100644
+--- a/components/connect/CMakeLists.txt
++++ b/components/connect/CMakeLists.txt
+@@ -9,6 +9,8 @@ INCLUDE_DIRS
+     "../asic/include"
+ 
+ REQUIRES
++    "esp_eth"
++    "esp_netif"
+     "nvs_flash"
+     "esp_wifi"
+     "esp_event"
+diff --git a/components/connect/connect.c b/components/connect/connect.c
+index bf9e83d..7599de6 100644
+--- a/components/connect/connect.c
++++ b/components/connect/connect.c
+@@ -1,6 +1,10 @@
+ #include <string.h>
+ #include "esp_event.h"
++#include "esp_eth.h"
++#include "esp_eth_mac_openeth.h"
++#include "esp_eth_phy.h"
+ #include "esp_log.h"
++#include "esp_netif.h"
+ #include "esp_wifi.h"
+ #include "freertos/event_groups.h"
+ #include "freertos/task.h"
+@@ -49,6 +53,12 @@
+ static const char * TAG = "connect";
+ 
+ static TimerHandle_t ip_acquire_timer = NULL;
++static GlobalState * active_global_state = NULL;
++static esp_netif_t * primary_netif = NULL;
++#ifdef CONFIG_BITAXE_VIRTUAL
++static esp_eth_handle_t eth_handle = NULL;
++static const uint8_t virtual_mac[6] = {0x02, 0x56, 0x41, 0x58, 0x45, 0x01};
++#endif
+ 
+ static bool is_scanning = false;
+ static uint16_t ap_number = 0;
+@@ -59,9 +69,48 @@ static int clients_connected_to_ap = 0;
+ static const char *get_wifi_reason_string(int reason);
+ static void wifi_softap_on(void);
+ static void wifi_softap_off(void);
++static esp_err_t init_virtual_openeth(GlobalState * GLOBAL_STATE);
++
++bool connect_is_network_connected(void)
++{
++    return active_global_state != NULL && active_global_state->SYSTEM_MODULE.is_connected;
++}
++
++esp_netif_t * connect_get_primary_netif(void)
++{
++    return primary_netif;
++}
++
++esp_err_t connect_get_mac_address(uint8_t mac[6])
++{
++#ifdef CONFIG_BITAXE_VIRTUAL
++    if (eth_handle != NULL) {
++        return esp_eth_ioctl(eth_handle, ETH_CMD_G_MAC_ADDR, mac);
++    }
++
++    memcpy(mac, virtual_mac, 6);
++    return ESP_OK;
++#else
++    return esp_wifi_get_mac(WIFI_IF_STA, mac);
++#endif
++}
++
++const char * connect_get_network_type(void)
++{
++#ifdef CONFIG_BITAXE_VIRTUAL
++    return "openeth";
++#else
++    return "wifi";
++#endif
++}
+ 
+ esp_err_t get_wifi_current_rssi(int8_t *rssi)
+ {
++#ifdef CONFIG_BITAXE_VIRTUAL
++    *rssi = -1;
++    return ESP_OK;
++#endif
++
+     wifi_ap_record_t current_ap_info;
+     esp_err_t err = esp_wifi_sta_get_ap_info(&current_ap_info);
+ 
+@@ -76,6 +125,12 @@ esp_err_t get_wifi_current_rssi(int8_t *rssi)
+ // Function to scan for available WiFi networks
+ esp_err_t wifi_scan(wifi_ap_record_simple_t *ap_records, uint16_t *ap_count)
+ {
++#ifdef CONFIG_BITAXE_VIRTUAL
++    (void)ap_records;
++    *ap_count = 0;
++    return ESP_OK;
++#endif
++
+     if (is_scanning) {
+         ESP_LOGW(TAG, "Scan already in progress");
+         return ESP_ERR_INVALID_STATE;
+@@ -322,6 +377,16 @@ static bool is_wifi_operation_allowed(esp_err_t err)
+ 
+ void toggle_wifi_softap(void)
+ {
++#ifdef CONFIG_BITAXE_VIRTUAL
++    if (active_global_state != NULL) {
++        active_global_state->SYSTEM_MODULE.ap_enabled = !active_global_state->SYSTEM_MODULE.ap_enabled;
++        snprintf(active_global_state->SYSTEM_MODULE.wifi_status,
++                 sizeof(active_global_state->SYSTEM_MODULE.wifi_status),
++                 active_global_state->SYSTEM_MODULE.ap_enabled ? "Virtual config mode" : "Connected!");
++    }
++    return;
++#endif
++
+     wifi_mode_t mode = WIFI_MODE_NULL;
+     esp_err_t err = esp_wifi_get_mode(&mode);
+     if (is_wifi_operation_allowed(err)) {
+@@ -355,6 +420,7 @@ static void wifi_softap_on(void)
+ esp_netif_t * wifi_init_sta(const char * wifi_ssid, const char * wifi_pass)
+ {
+     esp_netif_t * esp_netif_sta = esp_netif_create_default_wifi_sta();
++    primary_netif = esp_netif_sta;
+ 
+     /* Authmode threshold resets to WPA2 as default if password matches WPA2 standards (pasword len => 8).
+     * If you want to connect the device to deprecated WEP/WPA networks, Please set the threshold value
+@@ -416,6 +482,12 @@ esp_netif_t * wifi_init_sta(const char * wifi_ssid, const char * wifi_pass)
+ void wifi_init(void * pvParameters)
+ {
+     GlobalState * GLOBAL_STATE = (GlobalState *) pvParameters;
++    active_global_state = GLOBAL_STATE;
++
++#ifdef CONFIG_BITAXE_VIRTUAL
++    ESP_ERROR_CHECK(init_virtual_openeth(GLOBAL_STATE));
++    return;
++#endif
+ 
+     ESP_ERROR_CHECK(esp_netif_init());
+     ESP_ERROR_CHECK(esp_event_loop_create_default());
+@@ -481,6 +553,86 @@ void wifi_init(void * pvParameters)
+     }
+ }
+ 
++#ifdef CONFIG_BITAXE_VIRTUAL
++static void virtual_event_handler(void * arg, esp_event_base_t event_base, int32_t event_id, void * event_data)
++{
++    GlobalState * GLOBAL_STATE = (GlobalState *)arg;
++
++    if (event_base == ETH_EVENT) {
++        if (event_id == ETHERNET_EVENT_CONNECTED) {
++            strcpy(GLOBAL_STATE->SYSTEM_MODULE.wifi_status, "Link up");
++            GLOBAL_STATE->SYSTEM_MODULE.ap_enabled = false;
++            if (primary_netif != NULL) {
++                esp_netif_create_ip6_linklocal(primary_netif);
++            }
++        } else if (event_id == ETHERNET_EVENT_DISCONNECTED) {
++            GLOBAL_STATE->SYSTEM_MODULE.is_connected = false;
++            strcpy(GLOBAL_STATE->SYSTEM_MODULE.wifi_status, "Link down");
++            strcpy(GLOBAL_STATE->SYSTEM_MODULE.ip_addr_str, "");
++            strcpy(GLOBAL_STATE->SYSTEM_MODULE.ipv6_addr_str, "");
++        }
++    }
++
++    if (event_base == IP_EVENT && event_id == IP_EVENT_ETH_GOT_IP) {
++        ip_event_got_ip_t * event = (ip_event_got_ip_t *) event_data;
++        snprintf(GLOBAL_STATE->SYSTEM_MODULE.ip_addr_str, IP4ADDR_STRLEN_MAX, IPSTR, IP2STR(&event->ip_info.ip));
++        GLOBAL_STATE->SYSTEM_MODULE.is_connected = true;
++        strcpy(GLOBAL_STATE->SYSTEM_MODULE.wifi_status, "Connected!");
++    }
++
++    if (event_base == IP_EVENT && event_id == IP_EVENT_GOT_IP6) {
++        ip_event_got_ip6_t * event = (ip_event_got_ip6_t *) event_data;
++        inet_ntop(AF_INET6, &event->ip6_info.ip, GLOBAL_STATE->SYSTEM_MODULE.ipv6_addr_str, sizeof(GLOBAL_STATE->SYSTEM_MODULE.ipv6_addr_str));
++    }
++}
++
++static esp_err_t init_virtual_openeth(GlobalState * GLOBAL_STATE)
++{
++    ESP_ERROR_CHECK(esp_netif_init());
++
++    esp_err_t event_loop_ret = esp_event_loop_create_default();
++    if (event_loop_ret != ESP_OK && event_loop_ret != ESP_ERR_INVALID_STATE) {
++        ESP_ERROR_CHECK(event_loop_ret);
++    }
++
++    esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_ETH();
++    primary_netif = esp_netif_new(&netif_cfg);
++    if (primary_netif == NULL) {
++        return ESP_ERR_NO_MEM;
++    }
++
++    char * hostname = nvs_config_get_string(NVS_CONFIG_HOSTNAME);
++    if (hostname != NULL) {
++        esp_netif_set_hostname(primary_netif, hostname);
++        free(hostname);
++    }
++
++    esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &virtual_event_handler, GLOBAL_STATE);
++    esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &virtual_event_handler, GLOBAL_STATE);
++    esp_event_handler_register(IP_EVENT, IP_EVENT_GOT_IP6, &virtual_event_handler, GLOBAL_STATE);
++
++    eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
++    eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
++    phy_config.autonego_timeout_ms = 100;
++
++    esp_eth_mac_t * mac = esp_eth_mac_new_openeth(&mac_config);
++    esp_eth_phy_t * phy = esp_eth_phy_new_dp83848(&phy_config);
++    if (mac == NULL || phy == NULL) {
++        return ESP_FAIL;
++    }
++
++    esp_eth_config_t config = ETH_DEFAULT_CONFIG(mac, phy);
++    ESP_ERROR_CHECK(esp_eth_driver_install(&config, &eth_handle));
++    ESP_ERROR_CHECK(esp_eth_ioctl(eth_handle, ETH_CMD_S_MAC_ADDR, (void *)virtual_mac));
++
++    esp_eth_netif_glue_handle_t glue = esp_eth_new_netif_glue(eth_handle);
++    ESP_ERROR_CHECK(esp_netif_attach(primary_netif, glue));
++
++    strcpy(GLOBAL_STATE->SYSTEM_MODULE.wifi_status, "Starting OpenETH...");
++    return esp_eth_start(eth_handle);
++}
++#endif
++
+ typedef struct {
+     int reason;
+     const char *description;
+diff --git a/components/connect/include/connect.h b/components/connect/include/connect.h
+index 17d9e04..b777a91 100644
+--- a/components/connect/include/connect.h
++++ b/components/connect/include/connect.h
+@@ -4,7 +4,10 @@
+ #include "lwip/sys.h"
+ #include <arpa/inet.h>
+ #include <lwip/netdb.h>
++#include <stdbool.h>
+ 
++#include "esp_err.h"
++#include "esp_netif.h"
+ #include "esp_wifi_types.h"
+ 
+ // Structure to hold WiFi scan results
+@@ -18,5 +21,9 @@ void toggle_wifi_softap(void);
+ void wifi_init(void * GLOBAL_STATE);
+ esp_err_t wifi_scan(wifi_ap_record_simple_t *ap_records, uint16_t *ap_count);
+ esp_err_t get_wifi_current_rssi(int8_t *rssi);
++bool connect_is_network_connected(void);
++esp_netif_t * connect_get_primary_netif(void);
++esp_err_t connect_get_mac_address(uint8_t mac[6]);
++const char * connect_get_network_type(void);
+ 
+ #endif /* CONNECT_H_ */
+diff --git a/main/Kconfig.projbuild b/main/Kconfig.projbuild
+index 41d28ec..7013fe4 100755
+--- a/main/Kconfig.projbuild
++++ b/main/Kconfig.projbuild
+@@ -65,6 +65,22 @@ menu "Bitaxe Configuration"
+             The BM1397 hash frequency
+ endmenu
+ 
++menu "Virtual Bitaxe Configuration"
++
++    config BITAXE_VIRTUAL
++        bool "Enable the QEMU-only virtual Bitaxe target"
++        default n
++        help
++            Build ESP-Miner for the virtual Bitaxe wrapper that runs under
++            ESP32-S3 QEMU with OpenETH instead of the normal hardware stack.
++
++    config BITAXE_VIRTUAL_ASIC_MODE_CPU
++        bool
++        depends on BITAXE_VIRTUAL
++        default y
++
++endmenu
++
+ menu "Stratum Configuration"
+ 
+     config STRATUM_URL
+diff --git a/main/device_config.c b/main/device_config.c
+index 4685318..7cc1f7c 100644
+--- a/main/device_config.c
++++ b/main/device_config.c
+@@ -8,10 +8,38 @@
+ 
+ static const char * TAG = "device_config";
+ 
++#ifdef CONFIG_BITAXE_VIRTUAL
++static const DeviceConfig virtual_device_config = {
++    .board_version = "virtual-s3",
++    .family = {
++        .id = ULTRA,
++        .name = "Virtual",
++        .asic = ASIC_VIRTUAL_CONFIG,
++        .asic_count = 1,
++        .max_power = 5,
++        .power_offset = 0,
++        .nominal_voltage = 5,
++        .voltage_domains = 1,
++        .swarm_color = "gray",
++    },
++    .plug_sense = false,
++    .asic_enable = false,
++    .power_consumption_target = 1,
++};
++#endif
++
+ esp_err_t device_config_init(void * pvParameters)
+ {
+     GlobalState * GLOBAL_STATE = (GlobalState *) pvParameters;
+ 
++#ifdef CONFIG_BITAXE_VIRTUAL
++    GLOBAL_STATE->DEVICE_CONFIG = virtual_device_config;
++    ESP_LOGI(TAG, "Device Model: %s", GLOBAL_STATE->DEVICE_CONFIG.family.name);
++    ESP_LOGI(TAG, "Board Version: %s", GLOBAL_STATE->DEVICE_CONFIG.board_version);
++    ESP_LOGI(TAG, "ASIC: %dx %s (%d cores)", GLOBAL_STATE->DEVICE_CONFIG.family.asic_count, GLOBAL_STATE->DEVICE_CONFIG.family.asic.name, GLOBAL_STATE->DEVICE_CONFIG.family.asic.core_count);
++    return ESP_OK;
++#endif
++
+     // TODO: Read board version from eFuse
+ 
+     char * board_version = nvs_config_get_string(NVS_CONFIG_BOARD_VERSION);
+diff --git a/main/device_config.h b/main/device_config.h
+index 9404e34..b8c2b7a 100644
+--- a/main/device_config.h
++++ b/main/device_config.h
+@@ -13,6 +13,7 @@ typedef enum
+     BM1366,
+     BM1368,
+     BM1370,
++    ASIC_VIRTUAL,
+ } Asic;
+ 
+ typedef struct {
+@@ -82,4 +83,5 @@ static const uint16_t BM1366_FREQUENCY_OPTIONS[]   = {400, 425, 450, 475, 485, 5
+ static const uint16_t BM1368_FREQUENCY_OPTIONS[]   = {400, 425, 450, 475, 485, 490, 500, 525, 550, 575, 0};
+ static const uint16_t BM1370_FREQUENCY_OPTIONS[]   = {400, 490, 525, 550, 600, 625,                     0};
+ static const uint16_t BM1370_FRQUENCY_XP_OPTIONS[] = {350, 375, 380, 400, 410,                        0};
++static const uint16_t VIRTUAL_FREQUENCY_OPTIONS[]  = {50, 100, 200, 300,                               0};
+ 
+@@ -87,5 +89,6 @@ static const uint16_t BM1397_VOLTAGE_OPTIONS[] = {1100, 1150, 1200, 1250, 1300,
+ static const uint16_t BM1397_VOLTAGE_OPTIONS[] = {1100, 1150, 1200, 1250, 1300, 1350, 1400, 1450, 1500, 0};
+ static const uint16_t BM1366_VOLTAGE_OPTIONS[] = {1100, 1150, 1200, 1250, 1300,                         0};
+ static const uint16_t BM1368_VOLTAGE_OPTIONS[] = {1100, 1150, 1166, 1200, 1250, 1300,                   0};
+ static const uint16_t BM1370_VOLTAGE_OPTIONS[] = {1000, 1060, 1100, 1150, 1200, 1250,                   0};
++static const uint16_t VIRTUAL_VOLTAGE_OPTIONS[] = {900, 1000, 1100,                                      0};
+ 
+@@ -94,2 +97,3 @@ static const AsicConfig ASIC_BM1370XP = { .id = BM1370, .name = "BM1370", .chip_
+ 
++static const AsicConfig ASIC_VIRTUAL_CONFIG = { .id = ASIC_VIRTUAL, .name = "ASIC_VIRTUAL", .chip_id = 0, .default_frequency_mhz = 100, .frequency_options = VIRTUAL_FREQUENCY_OPTIONS, .default_voltage_mv = 1000, .voltage_options = VIRTUAL_VOLTAGE_OPTIONS, .difficulty = 1, .core_count = 1, .small_core_count = 1, .hash_domains = 1, .hashrate_test_percentage_target = 1.0, };
+ static const AsicConfig default_asic_configs[] = {
+@@ -99,7 +103,8 @@ static const AsicConfig default_asic_configs[] = {
+     ASIC_BM1397,
+     ASIC_BM1366,
+     ASIC_BM1368,
+     ASIC_BM1370,
+-    ASIC_BM1370XP
++    ASIC_BM1370XP,
++    ASIC_VIRTUAL_CONFIG
+ };
+ 
+ static const FamilyConfig FAMILY_MAX         = { .id = MAX,         .name = "Max",        .asic = ASIC_BM1397,   .asic_count = 1, .max_power =  25, .power_offset = 5,  .nominal_voltage = 5,  .voltage_domains = 1, .swarm_color = "red",      };
+diff --git a/main/http_server/axe-os/api/system/asic_settings.c b/main/http_server/axe-os/api/system/asic_settings.c
+index 087d1f1..0b91008 100644
+--- a/main/http_server/axe-os/api/system/asic_settings.c
++++ b/main/http_server/axe-os/api/system/asic_settings.c
+@@ -5,6 +5,7 @@
+ #include "global_state.h"
+ #include "asic.h"
+ #include "http_server.h"
++#include "virtual_asic.h"
+ 
+ static int system_asic_prebuffer_len = 256;
+ 
+@@ -43,6 +44,18 @@ esp_err_t GET_system_asic(httpd_req_t *req)
+     cJSON_AddStringToObject(root, "swarmColor", GLOBAL_STATE->DEVICE_CONFIG.family.swarm_color);
+     cJSON_AddNumberToObject(root, "asicCount", GLOBAL_STATE->DEVICE_CONFIG.family.asic_count);
+     cJSON_AddNumberToObject(root, "hashDomains", GLOBAL_STATE->DEVICE_CONFIG.family.asic.hash_domains);
++    cJSON_AddBoolToObject(root, "isVirtual",
++#ifdef CONFIG_BITAXE_VIRTUAL
++                          true
++#else
++                          false
++#endif
++    );
++#ifdef CONFIG_BITAXE_VIRTUAL
++    cJSON_AddStringToObject(root, "virtualBackend", VIRTUAL_ASIC_mode_string());
++#else
++    cJSON_AddStringToObject(root, "virtualBackend", "");
++#endif
+ 
+     cJSON_AddNumberToObject(root, "defaultFrequency", GLOBAL_STATE->DEVICE_CONFIG.family.asic.default_frequency_mhz);
+ 
+diff --git a/main/http_server/http_server.c b/main/http_server/http_server.c
+index b615589..b4595a1 100644
+--- a/main/http_server/http_server.c
++++ b/main/http_server/http_server.c
+@@ -45,7 +45,8 @@
+ #include "http_server.h"
+ #include "system.h"
+ #include "websocket.h"
++#include "virtual_asic.h"
+ #include "log_buffer.h"
+ 
+ static const char * TAG = "http_server";
+ static const char * CORS_TAG = "CORS";
+@@ -899,7 +900,9 @@ static esp_err_t GET_system_info(httpd_req_t * req)
+     float frequency = nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY);
+     
+     uint8_t mac[6];
+-    esp_wifi_get_mac(WIFI_IF_STA, mac);
++    if (connect_get_mac_address(mac) != ESP_OK) {
++        memset(mac, 0, sizeof(mac));
++    }
+     char formattedMac[18];
+     snprintf(formattedMac, sizeof(formattedMac), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+ 
+@@ -984,6 +987,19 @@ static esp_err_t GET_system_info(httpd_req_t * req)
+ 
+     cJSON_AddStringToObject(root, "version", GLOBAL_STATE->SYSTEM_MODULE.version);
+     cJSON_AddStringToObject(root, "axeOSVersion", GLOBAL_STATE->SYSTEM_MODULE.axeOSVersion);
++    cJSON_AddBoolToObject(root, "isVirtual",
++#ifdef CONFIG_BITAXE_VIRTUAL
++                          true
++#else
++                          false
++#endif
++    );
++    cJSON_AddStringToObject(root, "networkType", connect_get_network_type());
++#ifdef CONFIG_BITAXE_VIRTUAL
++    cJSON_AddStringToObject(root, "virtualAsicMode", VIRTUAL_ASIC_mode_string());
++#else
++    cJSON_AddStringToObject(root, "virtualAsicMode", "");
++#endif
+ 
+     cJSON_AddStringToObject(root, "idfVersion", esp_get_idf_version());
+     cJSON_AddStringToObject(root, "boardVersion", GLOBAL_STATE->DEVICE_CONFIG.board_version);
+@@ -1247,9 +1263,7 @@ esp_err_t POST_WWW_update(httpd_req_t * req)
+         return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+     }
+ 
+-    wifi_mode_t mode;
+-    esp_wifi_get_mode(&mode);
+-    if (mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA)
++    if (GLOBAL_STATE->SYSTEM_MODULE.ap_enabled)
+     {
+         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Not allowed in AP mode");
+         return ESP_OK;
+@@ -1331,9 +1345,7 @@ esp_err_t POST_OTA_update(httpd_req_t * req)
+         return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+     }
+ 
+-    wifi_mode_t mode;
+-    esp_wifi_get_mode(&mode);
+-    if (mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA)
++    if (GLOBAL_STATE->SYSTEM_MODULE.ap_enabled)
+     {
+         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Not allowed in AP mode");
+         return ESP_OK;
+@@ -1487,6 +1499,14 @@ esp_err_t start_rest_server(void * pvParameters)
+     };
+     httpd_register_uri_handler(server, &system_statistics_get_uri);
+ 
++    httpd_uri_t system_statistics_dashboard_get_uri = {
++        .uri = "/api/system/statistics/dashboard",
++        .method = HTTP_GET,
++        .handler = GET_system_statistics,
++        .user_ctx = rest_context
++    };
++    httpd_register_uri_handler(server, &system_statistics_dashboard_get_uri);
++
+     httpd_uri_t scoreboard_get_uri = {
+         .uri = "/api/system/scoreboard",
+         .method = HTTP_GET,
+diff --git a/main/main.c b/main/main.c
+index d3d9606..e616805 100644
+--- a/main/main.c
++++ b/main/main.c
+@@ -30,6 +30,14 @@ static GlobalState GLOBAL_STATE;
+ 
+ static const char * TAG = "bitaxe";
+ 
++static esp_err_t virtual_platform_early_init(GlobalState * GLOBAL_STATE)
++{
++    GLOBAL_STATE->SELF_TEST_MODULE.is_active = false;
++    GLOBAL_STATE->SELF_TEST_MODULE.is_finished = false;
++    GLOBAL_STATE->SELF_TEST_MODULE.system_init_ret = ESP_OK;
++    return ESP_OK;
++}
++
+ void app_main(void)
+ {
+     if (esp_psram_is_initialized()) {
+@@ -52,6 +60,7 @@ void app_main(void)
+         ESP_LOGE(TAG, "No PSRAM available on ESP32 device!");
+     }
+ 
++#ifndef CONFIG_BITAXE_VIRTUAL
+     // Init I2C
+     ESP_ERROR_CHECK(i2c_bitaxe_init());
+     ESP_LOGI(TAG, "I2C initialized successfully");
+@@ -65,6 +74,10 @@ void app_main(void)
+ 
+     // Init ADC
+     ADC_init();
++#else
++    ESP_ERROR_CHECK(virtual_platform_early_init(&GLOBAL_STATE));
++    ESP_LOGI(TAG, "Virtual platform early init complete");
++#endif
+ 
+     // initialize the ESP32 NVS
+     if (nvs_config_init() != ESP_OK) {
+@@ -88,10 +101,12 @@ void app_main(void)
+         return;
+     }
+ 
++#ifndef CONFIG_BITAXE_VIRTUAL
+     if (self_test_init(&GLOBAL_STATE) != ESP_OK) {
+         ESP_LOGE(TAG, "Failed to init self test");
+         return;
+     }
++#endif
+ 
+     SYSTEM_init_system(&GLOBAL_STATE);
+     if (scoreboard_init(&GLOBAL_STATE.SYSTEM_MODULE.scoreboard) != ESP_OK) {
+@@ -105,6 +120,7 @@ void app_main(void)
+     esp_err_t system_init_ret = SYSTEM_init_peripherals(&GLOBAL_STATE);
+     
+     if (system_init_ret == ESP_OK) {
++#ifndef CONFIG_BITAXE_VIRTUAL
+         if (xTaskCreate(POWER_MANAGEMENT_task, "power management", 8192, (void *) &GLOBAL_STATE, 10, NULL) != pdPASS) {
+             ESP_LOGE(TAG, "Error creating power management task");
+         }
+@@ -113,6 +129,7 @@ void app_main(void)
+                 ESP_LOGE(TAG, "Error creating fan controller task");
+             }
+         }
++#endif
+     } else {
+         ESP_LOGE(TAG, "Critical peripheral initialization failure (%s). Entering degraded mode.", esp_err_to_name(GLOBAL_STATE.SELF_TEST_MODULE.system_init_ret));
+     }
+@@ -125,12 +142,16 @@ void app_main(void)
+     // After mounting SPIFFS
+     SYSTEM_init_versions(&GLOBAL_STATE);
+ 
++#ifndef CONFIG_BITAXE_VIRTUAL
+     // Initialize BAP interface
+     esp_err_t bap_ret = BAP_init(&GLOBAL_STATE);
+     if (bap_ret != ESP_OK) {
+         ESP_LOGE(TAG, "Failed to initialize BAP interface: %d", bap_ret);
+         // Continue anyway, as BAP is not critical for core functionality
+     }
++#else
++    ESP_LOGI(TAG, "Skipping BAP init in virtual mode");
++#endif
+ 
+     while (!GLOBAL_STATE.SYSTEM_MODULE.is_connected) {
+         vTaskDelay(100 / portTICK_PERIOD_MS);
+diff --git a/main/power/asic_init.c b/main/power/asic_init.c
+index 7848f3d..918bbae 100644
+--- a/main/power/asic_init.c
++++ b/main/power/asic_init.c
+@@ -13,6 +13,19 @@ uint8_t asic_initialize(GlobalState *GLOBAL_STATE, asic_init_mode_t mode, uint32
+     const char *mode_str = (mode == ASIC_INIT_COLD_BOOT) ? "cold boot" : "recovery";
+     ESP_LOGI(TAG, "Starting ASIC initialization (%s mode)", mode_str);
+ 
++#ifdef CONFIG_BITAXE_VIRTUAL
++    uint8_t chip_count = ASIC_init(GLOBAL_STATE);
++    if (chip_count == 0) {
++        GLOBAL_STATE->SYSTEM_MODULE.asic_status = "Virtual ASIC init failed";
++        ESP_LOGE(TAG, "Virtual ASIC initialization failed");
++        return 0;
++    }
++
++    GLOBAL_STATE->SYSTEM_MODULE.asic_status = "Virtual ASIC ready";
++    GLOBAL_STATE->ASIC_initalized = true;
++    return chip_count;
++#else
++
+     if (asic_reset() != ESP_OK) {
+         GLOBAL_STATE->SYSTEM_MODULE.asic_status = "ASIC reset failed";
+         ESP_LOGE(TAG, "ASIC reset failed!");
+@@ -64,4 +77,5 @@ uint8_t asic_initialize(GlobalState *GLOBAL_STATE, asic_init_mode_t mode, uint32
+ 
+     ESP_LOGI(TAG, "ASIC initialized successfully with %d chip(s) (%s mode)", chip_count, mode_str);
+     return chip_count;
+-}
+\ No newline at end of file
++#endif
++}
+diff --git a/main/power/asic_reset.c b/main/power/asic_reset.c
+index 58b6747..2717327 100644
+--- a/main/power/asic_reset.c
++++ b/main/power/asic_reset.c
+@@ -7,6 +7,10 @@
+ static const char *TAG = "asic_reset";
+ 
+ esp_err_t asic_reset(void) {
++#ifdef CONFIG_BITAXE_VIRTUAL
++    return ESP_OK;
++#endif
++
+     esp_rom_gpio_pad_select_gpio(GPIO_ASIC_RESET);
+     ESP_RETURN_ON_ERROR(gpio_set_direction(GPIO_ASIC_RESET, GPIO_MODE_OUTPUT), TAG, "Can't set GPIO_ASIC_RESET direction");
+     ESP_RETURN_ON_ERROR(gpio_set_level(GPIO_ASIC_RESET, 0), TAG, "Can't set GPIO_ASIC_RESET level to LOW");
+@@ -17,6 +21,10 @@ esp_err_t asic_reset(void) {
+     return ESP_OK;
+ }
+ esp_err_t asic_hold_reset_low(void) {
++#ifdef CONFIG_BITAXE_VIRTUAL
++    return ESP_OK;
++#endif
++
+     esp_rom_gpio_pad_select_gpio(GPIO_ASIC_RESET);
+     ESP_RETURN_ON_ERROR(gpio_set_direction(GPIO_ASIC_RESET, GPIO_MODE_OUTPUT), TAG, "Can't set GPIO_ASIC_RESET direction");
+     ESP_RETURN_ON_ERROR(gpio_set_level(GPIO_ASIC_RESET, 0), TAG, "Can't set GPIO_ASIC_RESET level to LOW");
+diff --git a/main/power/vcore.c b/main/power/vcore.c
+index 5715ca2..7738f1b 100644
+--- a/main/power/vcore.c
++++ b/main/power/vcore.c
+@@ -7,6 +7,7 @@
+ #include "TPS546.h"
+ #include "adc.h"
+ #include "driver/gpio.h"
++#include "nvs_config.h"
+ #include "vcore.h"
+ 
+ #define GPIO_ASIC_ENABLE CONFIG_GPIO_ASIC_ENABLE
+@@ -83,6 +84,11 @@ static TPS546_CONFIG get_tps546_config(const FamilyConfig * family)
+ 
+ esp_err_t VCORE_init(GlobalState * GLOBAL_STATE)
+ {
++#ifdef CONFIG_BITAXE_VIRTUAL
++    GLOBAL_STATE->POWER_MANAGEMENT_MODULE.core_voltage = nvs_config_get_u16(NVS_CONFIG_ASIC_VOLTAGE);
++    return ESP_OK;
++#endif
++
+     ESP_RETURN_ON_FALSE(GLOBAL_STATE->DEVICE_CONFIG.family.voltage_domains != 0, ESP_FAIL, TAG, "voltage_domains not defined");
+ 
+     if (GLOBAL_STATE->DEVICE_CONFIG.DS4432U) {
+@@ -118,6 +124,11 @@ esp_err_t VCORE_init(GlobalState * GLOBAL_STATE)
+ 
+ esp_err_t VCORE_set_voltage(GlobalState * GLOBAL_STATE, float core_voltage)
+ {
++#ifdef CONFIG_BITAXE_VIRTUAL
++    GLOBAL_STATE->POWER_MANAGEMENT_MODULE.core_voltage = (int16_t)roundf(core_voltage * 1000.0f);
++    return ESP_OK;
++#endif
++
+     ESP_LOGI(TAG, "Set ASIC voltage = %.3fV", core_voltage);
+ 
+     // Enable/disable the ASIC power enable GPIO before touching the regulator
+@@ -140,6 +151,13 @@ esp_err_t VCORE_set_voltage(GlobalState * GLOBAL_STATE, float core_voltage)
+ 
+ int16_t VCORE_get_voltage_mv(GlobalState * GLOBAL_STATE)
+ {
++#ifdef CONFIG_BITAXE_VIRTUAL
++    if (GLOBAL_STATE->POWER_MANAGEMENT_MODULE.core_voltage > 0) {
++        return GLOBAL_STATE->POWER_MANAGEMENT_MODULE.core_voltage;
++    }
++    return nvs_config_get_u16(NVS_CONFIG_ASIC_VOLTAGE);
++#endif
++
+     if (GLOBAL_STATE->DEVICE_CONFIG.TPS546) {
+         return TPS546_get_vout() / GLOBAL_STATE->DEVICE_CONFIG.family.voltage_domains * 1000;
+     }
+@@ -148,6 +166,11 @@ int16_t VCORE_get_voltage_mv(GlobalState * GLOBAL_STATE)
+ 
+ esp_err_t VCORE_check_fault(GlobalState * GLOBAL_STATE)
+ {
++#ifdef CONFIG_BITAXE_VIRTUAL
++    (void)GLOBAL_STATE;
++    return ESP_OK;
++#endif
++
+     if (GLOBAL_STATE->DEVICE_CONFIG.TPS546) {
+         ESP_RETURN_ON_ERROR(TPS546_check_status(GLOBAL_STATE), TAG, "TPS546 check status failed!");
+     }
+@@ -156,6 +179,11 @@ esp_err_t VCORE_check_fault(GlobalState * GLOBAL_STATE)
+ 
+ const char * VCORE_get_fault_string(GlobalState * GLOBAL_STATE)
+ {
++#ifdef CONFIG_BITAXE_VIRTUAL
++    (void)GLOBAL_STATE;
++    return NULL;
++#endif
++
+     if (GLOBAL_STATE->DEVICE_CONFIG.TPS546) {
+         return TPS546_get_error_message();
+     }
+diff --git a/main/system.c b/main/system.c
+index 52fa9d9..63d4ad0 100644
+--- a/main/system.c
++++ b/main/system.c
+@@ -37,6 +37,7 @@ static const char * TAG = "system";
+ 
+ //local function prototypes
+ static esp_err_t ensure_overheat_mode_config();
++static esp_err_t SYSTEM_init_virtual_peripherals(GlobalState * GLOBAL_STATE);
+ 
+ void SYSTEM_init_system(GlobalState * GLOBAL_STATE)
+ {
+@@ -166,6 +167,10 @@ void SYSTEM_init_versions(GlobalState * GLOBAL_STATE) {
+ }
+ 
+ esp_err_t SYSTEM_init_peripherals(GlobalState * GLOBAL_STATE) {
++#ifdef CONFIG_BITAXE_VIRTUAL
++    return SYSTEM_init_virtual_peripherals(GLOBAL_STATE);
++#endif
++
+     esp_err_t ret = gpio_install_isr_service(0);
+     if (ret != ESP_OK) {
+         self_test_show_message(GLOBAL_STATE, "ISR:FAIL");
+@@ -244,6 +249,26 @@ esp_err_t SYSTEM_init_peripherals(GlobalState * GLOBAL_STATE) {
+     return ESP_OK;
+ }
+ 
++static esp_err_t SYSTEM_init_virtual_peripherals(GlobalState * GLOBAL_STATE)
++{
++    esp_err_t ret = ensure_overheat_mode_config();
++    if (ret != ESP_OK) {
++        ESP_LOGE(TAG, "Failed to ensure virtual overheat configuration");
++        return ret;
++    }
++
++    ret = filesystem_init(GLOBAL_STATE);
++    if (ret != ESP_OK) {
++        ESP_LOGE(TAG, "Filesystem init failed in virtual mode");
++    }
++
++    GLOBAL_STATE->SYSTEM_MODULE.is_screen_active = false;
++    GLOBAL_STATE->POWER_MANAGEMENT_MODULE.actual_frequency = nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY);
++    GLOBAL_STATE->POWER_MANAGEMENT_MODULE.core_voltage = nvs_config_get_u16(NVS_CONFIG_ASIC_VOLTAGE);
++
++    return ESP_OK;
++}
++
+ void SYSTEM_notify_accepted_share(GlobalState * GLOBAL_STATE)
+ {
+     SystemModule * module = &GLOBAL_STATE->SYSTEM_MODULE;
+diff --git a/main/tasks/hashrate_monitor_task.c b/main/tasks/hashrate_monitor_task.c
+index 9cd37e4..d332dd8 100644
+--- a/main/tasks/hashrate_monitor_task.c
++++ b/main/tasks/hashrate_monitor_task.c
+@@ -81,6 +81,22 @@ void update_hash_counter(measurement_t * measurement, uint32_t value, uint64_t t
+     measurement->time_us = time_us;
+ }
+ 
++static void update_raw_hash_counter(measurement_t * measurement, uint32_t value, uint64_t time_us)
++{
++    uint64_t previous_time_us = measurement->time_us;
++    if (previous_time_us != 0) {
++        uint64_t duration_us = time_us - previous_time_us;
++        uint32_t counter = value - measurement->value;
++        if (duration_us != 0) {
++            float seconds = duration_us / 1000000.0f;
++            measurement->hashrate = (counter / seconds) / 1e9f;
++        }
++    }
++
++    measurement->value = value;
++    measurement->time_us = time_us;
++}
++
+ static void init_averages()
+ {
+     float nan_val = nanf("");
+@@ -201,3 +217,18 @@ void hashrate_monitor_register_read(void *pvParameters, register_type_t register
+     int asic_count = GLOBAL_STATE->DEVICE_CONFIG.family.asic_count;
+ 
++#ifdef CONFIG_BITAXE_VIRTUAL
++    if (register_type == REGISTER_TOTAL_COUNT && GLOBAL_STATE->DEVICE_CONFIG.family.asic.id == ASIC_VIRTUAL) {
++        if (asic_nr >= asic_count) {
++            ESP_LOGE(TAG, "Asic nr out of bounds [%d]", asic_nr);
++            return;
++        }
++        uint64_t virtual_timestamp_us = esp_timer_get_time();
++        update_raw_hash_counter(&HASHRATE_MONITOR_MODULE->total_measurement[asic_nr], value, virtual_timestamp_us);
++        if (GLOBAL_STATE->DEVICE_CONFIG.family.asic.hash_domains > 0) {
++            update_raw_hash_counter(&HASHRATE_MONITOR_MODULE->domain_measurements[asic_nr][0], value, virtual_timestamp_us);
++        }
++        return;
++    }
++#endif
++
+     if (asic_nr >= asic_count) {
+diff --git a/main/tasks/stratum_task.c b/main/tasks/stratum_task.c
+index d905124..c2ace66 100644
+--- a/main/tasks/stratum_task.c
++++ b/main/tasks/stratum_task.c
+@@ -5,7 +5,6 @@
+ #include <lwip/netdb.h>
+ #include "stratum_task.h"
+ #include "work_queue.h"
+-#include "esp_wifi.h"
+ #include <esp_sntp.h>
+ #include "esp_timer.h"
+ #include <sys/time.h>
+@@ -17,6 +16,7 @@
+ #include "hashrate_monitor_task.h"
+ #include "esp_transport_ssl.h"
+ #include "freertos/task.h"
++#include "connect.h"
+ 
+ #define MAX_RETRY_ATTEMPTS 3
+ #define MAX_CRITICAL_RETRY_ATTEMPTS 5
+@@ -147,17 +147,17 @@ static esp_err_t resolve_stratum_address(const char *hostname, uint16_t port, st
+             if (addr6->sin6_scope_id == 0) {
+                 ESP_LOGW(TAG, "Link-local IPv6 address without scope ID - attempting to set from WiFi STA interface");
+ 
+-                esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
++                esp_netif_t *netif = connect_get_primary_netif();
+                 if (netif) {
+                     int index = esp_netif_get_netif_impl_index(netif);
+                     if (index >= 0) {
+                         addr6->sin6_scope_id = (uint32_t)index;
+                         ESP_LOGI(TAG, "Set IPv6 scope_id to interface index: %lu", (unsigned long)addr6->sin6_scope_id);
+                     } else {
+-                        ESP_LOGW(TAG, "Failed to get valid interface index for WIFI_STA_DEF");
++                        ESP_LOGW(TAG, "Failed to get valid interface index");
+                     }
+                 } else {
+-                    ESP_LOGW(TAG, "Could not get netif handle for WIFI_STA_DEF");
++                    ESP_LOGW(TAG, "Could not get the active network interface");
+                 }
+             } else {
+                 ESP_LOGI(TAG, "Link-local IPv6 address with existing scope_id: %lu", (unsigned long)addr6->sin6_scope_id);
+@@ -235,13 +235,9 @@ static void set_socket_options(esp_transport_handle_t transport)
+     }
+ }
+ 
+-bool is_wifi_connected() {
+-    wifi_ap_record_t ap_info;
+-    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+-        return true;
+-    } else {
+-        return false;
+-    }
++static bool is_network_connected(void)
++{
++    return connect_is_network_connected();
+ }
+ 
+ void cleanQueue(GlobalState * GLOBAL_STATE) {
+@@ -297,8 +293,8 @@ void stratum_primary_heartbeat(void * pvParameters)
+ 
+         ESP_LOGD(TAG, "Running Heartbeat on: %s!", primary_stratum_url);
+ 
+-        if (!is_wifi_connected()) {
+-            ESP_LOGD(TAG, "Heartbeat. Failed WiFi check!");
++        if (!is_network_connected()) {
++            ESP_LOGD(TAG, "Heartbeat. Failed network connectivity check");
+             vTaskDelay(10000 / portTICK_PERIOD_MS);
+             continue;
+         }
+@@ -471,8 +467,8 @@ void stratum_task(void * pvParameters)
+             continue;
+         }
+ 
+-        if (!is_wifi_connected()) {
+-            ESP_LOGI(TAG, "WiFi disconnected, attempting to reconnect...");
++        if (!is_network_connected()) {
++            ESP_LOGI(TAG, "Network disconnected, waiting for link...");
+             vTaskDelay(10000 / portTICK_PERIOD_MS);
+             continue;
+         }
+diff --git a/main/thermal/thermal.c b/main/thermal/thermal.c
+index 72c36cc..0d1db41 100644
+--- a/main/thermal/thermal.c
++++ b/main/thermal/thermal.c
+@@ -12,6 +12,11 @@ static const char * TAG = "thermal";
+ 
+ esp_err_t Thermal_init(DeviceConfig * DEVICE_CONFIG)
+ {
++#ifdef CONFIG_BITAXE_VIRTUAL
++    (void)DEVICE_CONFIG;
++    return ESP_OK;
++#endif
++
+     if (DEVICE_CONFIG->EMC2101) {
+         ESP_RETURN_ON_ERROR(EMC2101_init(DEVICE_CONFIG->temp_offset), TAG, "Failed to initialise EMC2101");
+         // TODO: Improve this check.
+@@ -37,6 +42,12 @@ esp_err_t Thermal_init(DeviceConfig * DEVICE_CONFIG)
+ //percent is a float between 0.0 and 1.0
+ esp_err_t Thermal_set_fan_percent(DeviceConfig * DEVICE_CONFIG, float percent)
+ {
++#ifdef CONFIG_BITAXE_VIRTUAL
++    (void)DEVICE_CONFIG;
++    (void)percent;
++    return ESP_OK;
++#endif
++
+     if (DEVICE_CONFIG->EMC2101) {
+         return EMC2101_set_fan_speed(percent);
+     }
+@@ -51,6 +62,11 @@ esp_err_t Thermal_set_fan_percent(DeviceConfig * DEVICE_CONFIG, float percent)
+ 
+ uint16_t Thermal_get_fan_speed(DeviceConfig * DEVICE_CONFIG) 
+ {
++#ifdef CONFIG_BITAXE_VIRTUAL
++    (void)DEVICE_CONFIG;
++    return 0;
++#endif
++
+     if (DEVICE_CONFIG->EMC2101) {
+         return EMC2101_get_fan_speed();
+     }
+@@ -65,6 +81,11 @@ uint16_t Thermal_get_fan_speed(DeviceConfig * DEVICE_CONFIG)
+ 
+ uint16_t Thermal_get_fan2_speed(DeviceConfig * DEVICE_CONFIG) 
+ {
++#ifdef CONFIG_BITAXE_VIRTUAL
++    (void)DEVICE_CONFIG;
++    return 0;
++#endif
++
+     if (DEVICE_CONFIG->EMC2302) {
+         return EMC2302_get_fan2_speed();
+     }
+@@ -73,6 +94,11 @@ uint16_t Thermal_get_fan2_speed(DeviceConfig * DEVICE_CONFIG)
+ 
+ float Thermal_get_chip_temp(GlobalState * GLOBAL_STATE)
+ {
++#ifdef CONFIG_BITAXE_VIRTUAL
++    (void)GLOBAL_STATE;
++    return 40.0f;
++#endif
++
+     if (!GLOBAL_STATE->ASIC_initalized) {
+         return -1;
+     }
+@@ -95,6 +121,11 @@ float Thermal_get_chip_temp(GlobalState * GLOBAL_STATE)
+ 
+ float Thermal_get_chip_temp2(GlobalState * GLOBAL_STATE)
+ {
++#ifdef CONFIG_BITAXE_VIRTUAL
++    (void)GLOBAL_STATE;
++    return 0.0f;
++#endif
++
+     if (!GLOBAL_STATE->ASIC_initalized) {
+         return -1;
+     }
+-- 
+2.50.1 (Apple Git-155)

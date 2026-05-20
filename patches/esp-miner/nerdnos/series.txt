@@ -1,0 +1,11 @@
+# NerdNos / NerdQAxePlus v1.0.37 source-specific patch series.
+#
+# The Bitaxe patch stack does not apply to this source layout. Runtime virtual
+# Gamma support requires source-specific C++ patches and must not be copied from
+# the Bitaxe mail patches mechanically.
+0001-nerdnos-add-virtual-gamma-api-boot-path.patch
+0002-nerdnos-add-virtual-asic-submit-path.patch
+0003-nerdnos-keep-virtual-mining-api-responsive.patch
+0004-nerdnos-low-difficulty-pool-interoperability.patch
+0005-nerdnos-precompute-virtual-nonce-search-material.patch
+0006-nerdnos-brand-virtualaxe-header.patch

@@ -1,0 +1,771 @@
+From 8ac074bd74677c6ae341a0f376c62d21f96f6d3e Mon Sep 17 00:00:00 2001
+From: virtualAxe <virtualaxe@example.invalid>
+Date: Wed, 6 May 2026 12:37:21 +0200
+Subject: [PATCH 13/13] virtual pool: support low-difficulty interoperability
+
+Why: support low-difficulty pool interoperability required by PublicPool,
+Bitronics, and Nerdminers verification.
+Virtual-only: subscribe-agent overrides, submit-response recovery, and timing
+adjustments are scoped to CONFIG_BITAXE_VIRTUAL; pool settings remain
+ESP-Miner-compatible API fields.
+Upstream surface: Stratum API/task behavior, NVS pool settings, HTTP system info,
+ASIC result handling, scoreboard formatting, and AxeOS difficulty display.
+Verify: run make verify-submit-replay and make verify-release.
+Removal impact: blocking pool phases can fail accepted-share evidence or report
+low-difficulty settings incorrectly.
+
+---
+ components/stratum/include/stratum_api.h      |  13 +-
+ components/stratum/stratum_api.c              | 122 +++++++++++++++++-
+ main/global_state.h                           |  10 +-
+ .../src/app/pipes/diff-suffix.pipe.spec.ts    |   6 +
+ .../axe-os/src/app/pipes/diff-suffix.pipe.ts  |   4 +
+ main/http_server/http_server.c                |  21 ++-
+ main/nvs_config.c                             |  36 +++++-
+ main/nvs_config.h                             |   2 +
+ main/system.c                                 |  26 +++-
+ main/tasks/asic_result_task.c                 |  26 ++++
+ main/tasks/scoreboard.c                       |  11 +-
+ main/tasks/stratum_task.c                     |  73 ++++++++++--
+ 12 files changed, 326 insertions(+), 24 deletions(-)
+
+diff --git a/components/stratum/include/stratum_api.h b/components/stratum/include/stratum_api.h
+index 3dbd6b6..8b1f912 100644
+--- a/components/stratum/include/stratum_api.h
++++ b/components/stratum/include/stratum_api.h
+@@ -84,9 +84,16 @@ esp_transport_handle_t STRATUM_V1_transport_init(tls_mode tls, char * cert);
+ 
+ void STRATUM_V1_initialize_buffer();
+ 
++#ifdef CONFIG_BITAXE_VIRTUAL
++void STRATUM_V1_reset_request_timings(void);
++void STRATUM_V1_set_submit_response_timeout_enabled(bool enabled);
++bool STRATUM_V1_submit_response_stalled(void);
++bool STRATUM_V1_consume_submit_response_timeout(void);
++#endif
++
+ char *STRATUM_V1_receive_jsonrpc_line(esp_transport_handle_t transport);
+ 
+-int STRATUM_V1_subscribe(esp_transport_handle_t transport, int send_uid, const char * model);
++int STRATUM_V1_subscribe(esp_transport_handle_t transport, int send_uid, const char * model, const char * subscribe_agent);
+ 
+ void STRATUM_V1_parse(StratumApiV1Message *message, const char *stratum_json);
+ 
+@@ -98,7 +105,7 @@ int STRATUM_V1_configure_version_rolling(esp_transport_handle_t transport, int s
+ 
+ int STRATUM_V1_pong(esp_transport_handle_t transport, int message_id);
+ 
+-int STRATUM_V1_suggest_difficulty(esp_transport_handle_t transport, int send_uid, uint32_t difficulty);
++int STRATUM_V1_suggest_difficulty(esp_transport_handle_t transport, int send_uid, float difficulty);
+ 
+ int STRATUM_V1_extranonce_subscribe(esp_transport_handle_t transport, int send_uid);
+ 
+@@ -108,4 +115,4 @@ int STRATUM_V1_submit_share(esp_transport_handle_t transport, int send_uid, cons
+ 
+ float STRATUM_V1_get_response_time_ms(int request_id, int64_t receive_time_us);
+ 
+-#endif // STRATUM_API_H
+\ No newline at end of file
++#endif // STRATUM_API_H
+diff --git a/components/stratum/stratum_api.c b/components/stratum/stratum_api.c
+index 7f34782..632ce27 100644
+--- a/components/stratum/stratum_api.c
++++ b/components/stratum/stratum_api.c
+@@ -30,6 +30,79 @@ static size_t json_rpc_buffer_size = 0;
+ 
+ static RequestTiming request_timings[MAX_REQUEST_IDS];
+ 
++#ifdef CONFIG_BITAXE_VIRTUAL
++static void debug_stratum_rx(const char *stratum_json)
++{
++    if (strstr(stratum_json, "\"method\":\"mining.notify\"") ||
++        strstr(stratum_json, "\"method\": \"mining.notify\"")) {
++        ESP_LOGI(TAG, "rx: mining.notify (%u bytes)", (unsigned)strlen(stratum_json));
++        return;
++    }
++    ESP_LOGI(TAG, "rx: %s", stratum_json);
++}
++#else
++static void debug_stratum_rx(const char *stratum_json)
++{
++    ESP_LOGI(TAG, "rx: %s", stratum_json);
++}
++#endif
++
++#ifdef CONFIG_BITAXE_VIRTUAL
++#define VIRTUAL_SUBMIT_RESPONSE_TIMEOUT_US (15LL * 1000 * 1000)
++
++static bool submit_response_timeout_enabled = false;
++static bool submit_response_timeout_pending = false;
++
++void STRATUM_V1_reset_request_timings(void)
++{
++    for (int i = 0; i < MAX_REQUEST_IDS; i++) {
++        request_timings[i].timestamp_us = 0;
++        request_timings[i].tracking = false;
++    }
++    submit_response_timeout_pending = false;
++}
++
++void STRATUM_V1_set_submit_response_timeout_enabled(bool enabled)
++{
++    submit_response_timeout_enabled = enabled;
++    if (!enabled) {
++        submit_response_timeout_pending = false;
++    }
++}
++
++static bool submit_response_stalled(int64_t now_us)
++{
++    if (!submit_response_timeout_enabled) {
++        return false;
++    }
++
++    for (int i = 0; i < MAX_REQUEST_IDS; i++) {
++        if (request_timings[i].tracking &&
++            request_timings[i].timestamp_us > 0 &&
++            now_us - request_timings[i].timestamp_us >= VIRTUAL_SUBMIT_RESPONSE_TIMEOUT_US) {
++            return true;
++        }
++    }
++    return false;
++}
++
++bool STRATUM_V1_submit_response_stalled(void)
++{
++    bool stalled = submit_response_stalled(esp_timer_get_time());
++    if (stalled) {
++        submit_response_timeout_pending = true;
++    }
++    return stalled;
++}
++
++bool STRATUM_V1_consume_submit_response_timeout(void)
++{
++    bool pending = submit_response_timeout_pending;
++    submit_response_timeout_pending = false;
++    return pending;
++}
++#endif
++
+ static RequestTiming* get_request_timing(int request_id) {
+     if (request_id < 0) return NULL;
+     int index = request_id % MAX_REQUEST_IDS;
+@@ -175,6 +248,14 @@ char * STRATUM_V1_receive_jsonrpc_line(esp_transport_handle_t transport)
+         if (nbytes > 0) {
+             realloc_json_buffer(nbytes);
+             strncat(json_rpc_buffer, recv_buffer, nbytes);
++        } else {
++#ifdef CONFIG_BITAXE_VIRTUAL
++            if (STRATUM_V1_submit_response_stalled()) {
++                ESP_LOGW(TAG, "Virtual submit response stalled; reconnecting");
++                json_rpc_buffer[0] = '\0';
++                return NULL;
++            }
++#endif
+         }
+     }
+ 
+@@ -200,3 +281,3 @@ void STRATUM_V1_parse(StratumApiV1Message * message, const char * stratum_json)
+-    ESP_LOGI(TAG, "rx: %s", stratum_json); // debug incoming stratum messages
++    debug_stratum_rx(stratum_json);
+ 
+     cJSON * json = cJSON_Parse(stratum_json);
+@@ -460,25 +541,58 @@ static void debug_stratum_tx(const char * msg)
+     }
+ }
+ 
+-int STRATUM_V1_subscribe(esp_transport_handle_t transport, int send_uid, const char * model)
++#ifdef CONFIG_BITAXE_VIRTUAL
++static bool subscribe_agent_is_usable(const char *subscribe_agent)
++{
++    if (subscribe_agent == NULL || subscribe_agent[0] == '\0') {
++        return false;
++    }
++
++    for (const unsigned char *p = (const unsigned char *)subscribe_agent; *p != '\0'; p++) {
++        if (*p < 0x20 || *p == '"' || *p == '\\') {
++            return false;
++        }
++    }
++    return true;
++}
++#endif
++
++int STRATUM_V1_subscribe(esp_transport_handle_t transport, int send_uid, const char * model, const char * subscribe_agent)
+ {
+     // Subscribe
+     char subscribe_msg[BUFFER_SIZE];
+     const esp_app_desc_t *app_desc = esp_app_get_description();
+     const char *version = app_desc->version;	
++
++#ifdef CONFIG_BITAXE_VIRTUAL
++    if (subscribe_agent_is_usable(subscribe_agent)) {
++        snprintf(subscribe_msg, sizeof(subscribe_msg),
++            "{\"id\":%d,\"method\":\"mining.subscribe\",\"params\":[\"%s\"]}\n",
++            send_uid, subscribe_agent);
++    } else {
++        if (subscribe_agent != NULL && subscribe_agent[0] != '\0') {
++            ESP_LOGW(TAG, "Ignoring unsafe mining.subscribe agent override");
++        }
++        snprintf(subscribe_msg, sizeof(subscribe_msg),
++            "{\"id\":%d,\"method\":\"mining.subscribe\",\"params\":[\"bitaxe/%s/%s\"]}\n",
++            send_uid, model, version);
++    }
++#else
++    (void)subscribe_agent;
+     snprintf(subscribe_msg, sizeof(subscribe_msg),
+         "{\"id\":%d,\"method\":\"mining.subscribe\",\"params\":[\"bitaxe/%s/%s\"]}\n",
+         send_uid, model, version);
++#endif
+     debug_stratum_tx(subscribe_msg);
+ 
+     return esp_transport_write(transport, subscribe_msg, strlen(subscribe_msg), TRANSPORT_TIMEOUT_MS);
+ }
+ 
+-int STRATUM_V1_suggest_difficulty(esp_transport_handle_t transport, int send_uid, uint32_t difficulty)
++int STRATUM_V1_suggest_difficulty(esp_transport_handle_t transport, int send_uid, float difficulty)
+ {
+     char difficulty_msg[BUFFER_SIZE];
+     snprintf(difficulty_msg, sizeof(difficulty_msg),
+-        "{\"id\":%d,\"method\":\"mining.suggest_difficulty\",\"params\":[%ld]}\n",
++        "{\"id\":%d,\"method\":\"mining.suggest_difficulty\",\"params\":[%.8g]}\n",
+         send_uid, difficulty);
+     debug_stratum_tx(difficulty_msg);
+ 
+diff --git a/main/global_state.h b/main/global_state.h
+index 26431bc..1994a63 100644
+--- a/main/global_state.h
++++ b/main/global_state.h
+@@ -46,6 +46,10 @@ typedef struct
+     char best_diff_string[DIFF_STRING_SIZE];
+     uint64_t best_session_nonce_diff;
+     char best_session_diff_string[DIFF_STRING_SIZE];
++#ifdef CONFIG_BITAXE_VIRTUAL
++    double virtual_best_nonce_diff;
++    double virtual_best_session_nonce_diff;
++#endif
+     int block_found;
+     bool show_new_block;
+     char * ssid;
+@@ -64,8 +68,8 @@ typedef struct
+     char * fallback_pool_user;
+     char * pool_pass;
+     char * fallback_pool_pass;
+-    uint16_t pool_difficulty;
+-    uint16_t fallback_pool_difficulty;
++    float pool_difficulty;
++    float fallback_pool_difficulty;
+     bool pool_extranonce_subscribe;
+     bool fallback_pool_extranonce_subscribe;
+     bool pool_decode_coinbase_tx;
+@@ -80,6 +84,8 @@ typedef struct
+     uint16_t fallback_pool_tls;
+     char * pool_cert;
+     char * fallback_pool_cert;
++    char * pool_subscribe_agent;
++    char * fallback_pool_subscribe_agent;
+     bool is_using_fallback;
+     char pool_connection_info[64];
+     bool overheat_mode;
+diff --git a/main/http_server/axe-os/src/app/pipes/diff-suffix.pipe.spec.ts b/main/http_server/axe-os/src/app/pipes/diff-suffix.pipe.spec.ts
+index 36393de..d12f3cc 100644
+--- a/main/http_server/axe-os/src/app/pipes/diff-suffix.pipe.spec.ts
++++ b/main/http_server/axe-os/src/app/pipes/diff-suffix.pipe.spec.ts
+@@ -5,4 +5,10 @@ describe('DiffSuffixPipe', () => {
+     const pipe = new DiffSuffixPipe();
+     expect(pipe).toBeTruthy();
+   });
++
++  it('formats fractional low-difficulty values', () => {
++    const pipe = new DiffSuffixPipe();
++    expect(pipe.transform(0.0005)).toBe('0.0005');
++    expect(pipe.transform(0.12)).toBe('0.12');
++  });
+ });
+diff --git a/main/http_server/axe-os/src/app/pipes/diff-suffix.pipe.ts b/main/http_server/axe-os/src/app/pipes/diff-suffix.pipe.ts
+index 7c191ad..9f22c7f 100644
+--- a/main/http_server/axe-os/src/app/pipes/diff-suffix.pipe.ts
++++ b/main/http_server/axe-os/src/app/pipes/diff-suffix.pipe.ts
+@@ -17,6 +17,10 @@ export class DiffSuffixPipe implements PipeTransform {
+       return '0';
+     }
+ 
++    if (value > 0 && value < 1) {
++      return value.toPrecision(2).replace(/\.?0+$/, '');
++    }
++
+     const suffixes = ['', 'K', 'M', 'G', 'T', 'P', 'E'];
+ 
+     const power = Math.max(0, Math.floor(Math.log10(value) / 3));
+diff --git a/main/http_server/http_server.c b/main/http_server/http_server.c
+index c82f1dc..505fdbe 100644
+--- a/main/http_server/http_server.c
++++ b/main/http_server/http_server.c
+@@ -922,6 +922,8 @@ static esp_err_t GET_system_info(httpd_req_t * req)
+     char * fallbackStratumUser = nvs_config_get_string(NVS_CONFIG_FALLBACK_STRATUM_USER);
+     char * stratumCert = nvs_config_get_string(NVS_CONFIG_STRATUM_CERT);
+     char * fallbackStratumCert = nvs_config_get_string(NVS_CONFIG_FALLBACK_STRATUM_CERT);
++    char * stratumSubscribeAgent = nvs_config_get_string(NVS_CONFIG_STRATUM_SUBSCRIBE_AGENT);
++    char * fallbackStratumSubscribeAgent = nvs_config_get_string(NVS_CONFIG_FALLBACK_STRATUM_SUBSCRIBE_AGENT);
+     char * display = nvs_config_get_string(NVS_CONFIG_DISPLAY);
+     float frequency = nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY);
+     
+@@ -950,8 +952,19 @@ static esp_err_t GET_system_info(httpd_req_t * req)
+     cJSON_AddFloatToObject(root, "hashRate_1h", GLOBAL_STATE->SYSTEM_MODULE.hashrate_1h);
+     cJSON_AddFloatToObject(root, "expectedHashrate", GLOBAL_STATE->POWER_MANAGEMENT_MODULE.expected_hashrate);
+     cJSON_AddFloatToObject(root, "errorPercentage", GLOBAL_STATE->SYSTEM_MODULE.error_percentage);
++#ifdef CONFIG_BITAXE_VIRTUAL
++    double best_diff = GLOBAL_STATE->SYSTEM_MODULE.virtual_best_nonce_diff > 0.0
++        ? GLOBAL_STATE->SYSTEM_MODULE.virtual_best_nonce_diff
++        : (double)GLOBAL_STATE->SYSTEM_MODULE.best_nonce_diff;
++    double best_session_diff = GLOBAL_STATE->SYSTEM_MODULE.virtual_best_session_nonce_diff > 0.0
++        ? GLOBAL_STATE->SYSTEM_MODULE.virtual_best_session_nonce_diff
++        : (double)GLOBAL_STATE->SYSTEM_MODULE.best_session_nonce_diff;
++    cJSON_AddNumberToObject(root, "bestDiff", best_diff);
++    cJSON_AddNumberToObject(root, "bestSessionDiff", best_session_diff);
++#else
+     cJSON_AddNumberToObject(root, "bestDiff", GLOBAL_STATE->SYSTEM_MODULE.best_nonce_diff);
+     cJSON_AddNumberToObject(root, "bestSessionDiff", GLOBAL_STATE->SYSTEM_MODULE.best_session_nonce_diff);
++#endif
+     cJSON_AddNumberToObject(root, "poolDifficulty", GLOBAL_STATE->pool_difficulty);
+ 
+     cJSON_AddNumberToObject(root, "isUsingFallbackStratum", GLOBAL_STATE->SYSTEM_MODULE.is_using_fallback);
+@@ -998,18 +1011,20 @@ static esp_err_t GET_system_info(httpd_req_t * req)
+     cJSON_AddStringToObject(root, "stratumURL", stratumURL);
+     cJSON_AddNumberToObject(root, "stratumPort", nvs_config_get_u16(NVS_CONFIG_STRATUM_PORT));
+     cJSON_AddStringToObject(root, "stratumUser", stratumUser);
+-    cJSON_AddNumberToObject(root, "stratumSuggestedDifficulty", nvs_config_get_u16(NVS_CONFIG_STRATUM_DIFFICULTY));
++    cJSON_AddNumberToObject(root, "stratumSuggestedDifficulty", nvs_config_get_float(NVS_CONFIG_STRATUM_DIFFICULTY));
+     cJSON_AddNumberToObject(root, "stratumExtranonceSubscribe", nvs_config_get_bool(NVS_CONFIG_STRATUM_EXTRANONCE_SUBSCRIBE));
+     cJSON_AddNumberToObject(root, "stratumTLS", nvs_config_get_u16(NVS_CONFIG_STRATUM_TLS));
+     cJSON_AddStringToObject(root, "stratumCert", stratumCert);
++    cJSON_AddStringToObject(root, "stratumSubscribeAgent", stratumSubscribeAgent);
+     cJSON_AddNumberToObject(root, "stratumDecodeCoinbase", nvs_config_get_bool(NVS_CONFIG_STRATUM_DECODE_COINBASE_TX));
+     cJSON_AddStringToObject(root, "fallbackStratumURL", fallbackStratumURL);
+     cJSON_AddNumberToObject(root, "fallbackStratumPort", nvs_config_get_u16(NVS_CONFIG_FALLBACK_STRATUM_PORT));
+     cJSON_AddStringToObject(root, "fallbackStratumUser", fallbackStratumUser);
+-    cJSON_AddNumberToObject(root, "fallbackStratumSuggestedDifficulty", nvs_config_get_u16(NVS_CONFIG_FALLBACK_STRATUM_DIFFICULTY));
++    cJSON_AddNumberToObject(root, "fallbackStratumSuggestedDifficulty", nvs_config_get_float(NVS_CONFIG_FALLBACK_STRATUM_DIFFICULTY));
+     cJSON_AddNumberToObject(root, "fallbackStratumExtranonceSubscribe", nvs_config_get_bool(NVS_CONFIG_FALLBACK_STRATUM_EXTRANONCE_SUBSCRIBE));
+     cJSON_AddNumberToObject(root, "fallbackStratumTLS", nvs_config_get_u16(NVS_CONFIG_FALLBACK_STRATUM_TLS));
+     cJSON_AddStringToObject(root, "fallbackStratumCert", fallbackStratumCert);
++    cJSON_AddStringToObject(root, "fallbackStratumSubscribeAgent", fallbackStratumSubscribeAgent);
+     cJSON_AddNumberToObject(root, "fallbackStratumDecodeCoinbase", nvs_config_get_bool(NVS_CONFIG_FALLBACK_STRATUM_DECODE_COINBASE_TX));
+     cJSON_AddFloatToObject(root, "responseTime", GLOBAL_STATE->SYSTEM_MODULE.response_time);
+     cJSON_AddFloatToObject(root, "cpuUsage", GLOBAL_STATE->SYSTEM_MODULE.cpu_usage);
+@@ -1134,6 +1149,8 @@ static esp_err_t GET_system_info(httpd_req_t * req)
+     free(fallbackStratumURL);
+     free(stratumCert);
+     free(fallbackStratumCert);
++    free(stratumSubscribeAgent);
++    free(fallbackStratumSubscribeAgent);
+     free(stratumUser);
+     free(fallbackStratumUser);
+     free(display);
+diff --git a/main/nvs_config.c b/main/nvs_config.c
+index df1bd86..da83a86 100644
+--- a/main/nvs_config.c
++++ b/main/nvs_config.c
+@@ -55,19 +55,21 @@ static Settings settings[NVS_CONFIG_COUNT] = {
+     [NVS_CONFIG_STRATUM_PORT]                          = {.nvs_key_name = "stratumport",     .type = TYPE_U16,   .default_value = {.u16 = CONFIG_STRATUM_PORT},                         .rest_name = "stratumPort",                        .min = 0,  .max = UINT16_MAX},
+     [NVS_CONFIG_STRATUM_USER]                          = {.nvs_key_name = "stratumuser",     .type = TYPE_STR,   .default_value = {.str = (char *)CONFIG_STRATUM_USER},                 .rest_name = "stratumUser",                        .min = 0,  .max = NVS_STR_LIMIT},
+     [NVS_CONFIG_STRATUM_PASS]                          = {.nvs_key_name = "stratumpass",     .type = TYPE_STR,   .default_value = {.str = (char *)CONFIG_STRATUM_PW},                   .rest_name = "stratumPassword",                    .min = 0,  .max = NVS_STR_LIMIT},
+-    [NVS_CONFIG_STRATUM_DIFFICULTY]                    = {.nvs_key_name = "stratumdiff",     .type = TYPE_U16,   .default_value = {.u16 = CONFIG_STRATUM_DIFFICULTY},                   .rest_name = "stratumSuggestedDifficulty",         .min = 0,  .max = UINT16_MAX},
++    [NVS_CONFIG_STRATUM_DIFFICULTY]                    = {.nvs_key_name = "stratumdiff",     .type = TYPE_FLOAT, .default_value = {.f   = CONFIG_STRATUM_DIFFICULTY},                   .rest_name = "stratumSuggestedDifficulty",         .min = 0,  .max = UINT16_MAX},
+     [NVS_CONFIG_STRATUM_EXTRANONCE_SUBSCRIBE]          = {.nvs_key_name = "stratumxnsub",    .type = TYPE_BOOL,  .default_value = {.b   = (bool)STRATUM_EXTRANONCE_SUBSCRIBE},          .rest_name = "stratumExtranonceSubscribe",         .min = 0,  .max = 1},
+     [NVS_CONFIG_STRATUM_TLS]                           = {.nvs_key_name = "stratumtls",      .type = TYPE_U16,   .default_value = {.u16 = (uint16_t)CONFIG_STRATUM_TLS},                .rest_name = "stratumTLS",                         .min = 0,  .max = 3},
+     [NVS_CONFIG_STRATUM_CERT]                          = {.nvs_key_name = "stratumcert",     .type = TYPE_STR,   .default_value = {.str = (char *)CONFIG_STRATUM_CERT},                 .rest_name = "stratumCert",                        .min = 0,  .max = NVS_STR_LIMIT},
++    [NVS_CONFIG_STRATUM_SUBSCRIBE_AGENT]               = {.nvs_key_name = "stratumagent",    .type = TYPE_STR,   .default_value = {.str = ""},                                          .rest_name = "stratumSubscribeAgent",              .min = 0,  .max = 128},
+     [NVS_CONFIG_STRATUM_DECODE_COINBASE_TX]            = {.nvs_key_name = "stratumdecode",   .type = TYPE_BOOL,  .default_value = {.b   = true},                                        .rest_name = "stratumDecodeCoinbase",              .min = 0,  .max = 1},
+     [NVS_CONFIG_FALLBACK_STRATUM_URL]                  = {.nvs_key_name = "fbstratumurl",    .type = TYPE_STR,   .default_value = {.str = (char *)CONFIG_FALLBACK_STRATUM_URL},         .rest_name = "fallbackStratumURL",                 .min = 0,  .max = NVS_STR_LIMIT},
+     [NVS_CONFIG_FALLBACK_STRATUM_PORT]                 = {.nvs_key_name = "fbstratumport",   .type = TYPE_U16,   .default_value = {.u16 = CONFIG_FALLBACK_STRATUM_PORT},                .rest_name = "fallbackStratumPort",                .min = 0,  .max = UINT16_MAX},
+     [NVS_CONFIG_FALLBACK_STRATUM_USER]                 = {.nvs_key_name = "fbstratumuser",   .type = TYPE_STR,   .default_value = {.str = (char *)CONFIG_FALLBACK_STRATUM_USER},        .rest_name = "fallbackStratumUser",                .min = 0,  .max = NVS_STR_LIMIT},
+     [NVS_CONFIG_FALLBACK_STRATUM_PASS]                 = {.nvs_key_name = "fbstratumpass",   .type = TYPE_STR,   .default_value = {.str = (char *)CONFIG_FALLBACK_STRATUM_PW},          .rest_name = "fallbackStratumPassword",            .min = 0,  .max = NVS_STR_LIMIT},
+-    [NVS_CONFIG_FALLBACK_STRATUM_DIFFICULTY]           = {.nvs_key_name = "fbstratumdiff",   .type = TYPE_U16,   .default_value = {.u16 = CONFIG_FALLBACK_STRATUM_DIFFICULTY},          .rest_name = "fallbackStratumSuggestedDifficulty", .min = 0,  .max = UINT16_MAX},
++    [NVS_CONFIG_FALLBACK_STRATUM_DIFFICULTY]           = {.nvs_key_name = "fbstratumdiff",   .type = TYPE_FLOAT, .default_value = {.f   = CONFIG_FALLBACK_STRATUM_DIFFICULTY},          .rest_name = "fallbackStratumSuggestedDifficulty", .min = 0,  .max = UINT16_MAX},
+     [NVS_CONFIG_FALLBACK_STRATUM_EXTRANONCE_SUBSCRIBE] = {.nvs_key_name = "stratumfbxnsub",  .type = TYPE_BOOL,  .default_value = {.b   = (bool)FALLBACK_STRATUM_EXTRANONCE_SUBSCRIBE}, .rest_name = "fallbackStratumExtranonceSubscribe", .min = 0,  .max = 1},
+     [NVS_CONFIG_FALLBACK_STRATUM_TLS]                  = {.nvs_key_name = "fbstratumtls",    .type = TYPE_U16,   .default_value = {.u16 = (uint16_t)CONFIG_FALLBACK_STRATUM_TLS},       .rest_name = "fallbackStratumTLS",                 .min = 0,  .max = 3},
+     [NVS_CONFIG_FALLBACK_STRATUM_CERT]                 = {.nvs_key_name = "fbstratumcert",   .type = TYPE_STR,   .default_value = {.str = (char *)CONFIG_FALLBACK_STRATUM_CERT},        .rest_name = "fallbackStratumCert",                .min = 0,  .max = NVS_STR_LIMIT},
++    [NVS_CONFIG_FALLBACK_STRATUM_SUBSCRIBE_AGENT]      = {.nvs_key_name = "fbstratumagent",  .type = TYPE_STR,   .default_value = {.str = ""},                                          .rest_name = "fallbackStratumSubscribeAgent",      .min = 0,  .max = 128},
+     [NVS_CONFIG_FALLBACK_STRATUM_DECODE_COINBASE_TX]   = {.nvs_key_name = "fbstratumdecode", .type = TYPE_BOOL,  .default_value = {.b   = true},                                        .rest_name = "fallbackStratumDecodeCoinbase",      .min = 0,  .max = 1},
+     [NVS_CONFIG_USE_FALLBACK_STRATUM]                  = {.nvs_key_name = "usefbstartum",    .type = TYPE_BOOL,                                                                         .rest_name = "useFallbackStratum",                 .min = 0,  .max = 1},
+ 
+@@ -177,6 +179,32 @@ static void nvs_config_apply_fallback(NvsConfigKey key, Settings * setting)
+     }
+ }
+ 
++static bool nvs_config_migrate_float_from_u16(NvsConfigKey key, const char *nvs_key, float *out_value)
++{
++    if (
++        key != NVS_CONFIG_STRATUM_DIFFICULTY &&
++        key != NVS_CONFIG_FALLBACK_STRATUM_DIFFICULTY
++    ) {
++        return false;
++    }
++
++    uint16_t legacy_value;
++    esp_err_t ret = nvs_get_u16(handle, nvs_key, &legacy_value);
++    if (ret != ESP_OK) {
++        return false;
++    }
++
++    *out_value = (float)legacy_value;
++    char buf[32];
++    snprintf(buf, sizeof(buf), "%f", *out_value);
++    ESP_LOGI(TAG, "Migrating NVS config %s from u16 to float (%u)", nvs_key, legacy_value);
++    ret = nvs_set_str(handle, nvs_key, buf);
++    if (ret == ESP_OK) {
++        nvs_commit(handle);
++    }
++    return true;
++}
++
+ static bool nvs_config_apply_update(ConfigUpdate *update)
+ {
+     Settings *setting = nvs_config_get_settings(update->key);
+@@ -363,7 +391,7 @@ esp_err_t nvs_config_init(void)
+                             ESP_LOGW(TAG, "Corrupt float in NVS for %s ('%s'), using default", setting->nvs_key_name, buf);
+                             setting->value[idx].f = setting->default_value.f;
+                         }
+-                    } else {
++                    } else if (!nvs_config_migrate_float_from_u16(key, nvs_key, &setting->value[idx].f)) {
+                         setting->value[idx].f = setting->default_value.f;
+                     }
+                     break;
+@@ -556,7 +584,7 @@ float nvs_config_get_float(NvsConfigKey key)
+ void nvs_config_set_float(NvsConfigKey key, float value)
+ {
+     Settings *setting = nvs_config_get_settings(key);
+-    if (!setting || setting->type != TYPE_FLOAT || fabsf(setting->value[0].f - value) < 0.001f) return;
++    if (!setting || setting->type != TYPE_FLOAT || setting->value[0].f == value) return;
+ 
+     ConfigUpdate update = { .key = key, .type = TYPE_FLOAT, .value.f = value };
+     xQueueSend(nvs_save_queue, &update, portMAX_DELAY);
+diff --git a/main/nvs_config.h b/main/nvs_config.h
+index 2cfe73d..e7494a4 100644
+--- a/main/nvs_config.h
++++ b/main/nvs_config.h
+@@ -18,6 +18,7 @@ typedef enum {
+     NVS_CONFIG_STRATUM_EXTRANONCE_SUBSCRIBE,
+     NVS_CONFIG_STRATUM_TLS,
+     NVS_CONFIG_STRATUM_CERT,
++    NVS_CONFIG_STRATUM_SUBSCRIBE_AGENT,
+     NVS_CONFIG_STRATUM_DECODE_COINBASE_TX,
+     NVS_CONFIG_FALLBACK_STRATUM_URL,
+     NVS_CONFIG_FALLBACK_STRATUM_PORT,
+@@ -27,6 +28,7 @@ typedef enum {
+     NVS_CONFIG_FALLBACK_STRATUM_EXTRANONCE_SUBSCRIBE,
+     NVS_CONFIG_FALLBACK_STRATUM_TLS,
+     NVS_CONFIG_FALLBACK_STRATUM_CERT,
++    NVS_CONFIG_FALLBACK_STRATUM_SUBSCRIBE_AGENT,
+     NVS_CONFIG_FALLBACK_STRATUM_DECODE_COINBASE_TX,
+     NVS_CONFIG_USE_FALLBACK_STRATUM,
+     
+diff --git a/main/system.c b/main/system.c
+index b3f8c80..216841e 100644
+--- a/main/system.c
++++ b/main/system.c
+@@ -50,6 +50,10 @@ void SYSTEM_init_system(GlobalState * GLOBAL_STATE)
+     module->shares_rejected = 0;
+     module->best_nonce_diff = nvs_config_get_u64(NVS_CONFIG_BEST_DIFF);
+     module->best_session_nonce_diff = 0;
++#ifdef CONFIG_BITAXE_VIRTUAL
++    module->virtual_best_nonce_diff = (double)module->best_nonce_diff;
++    module->virtual_best_session_nonce_diff = 0.0;
++#endif
+     module->start_time = esp_timer_get_time();
+     module->lastClockSync = 0;
+     module->block_found = 0;
+@@ -76,6 +80,10 @@ void SYSTEM_init_system(GlobalState * GLOBAL_STATE)
+     module->pool_cert = nvs_config_get_string(NVS_CONFIG_STRATUM_CERT);
+     module->fallback_pool_cert = nvs_config_get_string(NVS_CONFIG_FALLBACK_STRATUM_CERT);
+ 
++    // set the pool subscribe agent override
++    module->pool_subscribe_agent = nvs_config_get_string(NVS_CONFIG_STRATUM_SUBSCRIBE_AGENT);
++    module->fallback_pool_subscribe_agent = nvs_config_get_string(NVS_CONFIG_FALLBACK_STRATUM_SUBSCRIBE_AGENT);
++
+     // set the pool user
+     module->pool_user = nvs_config_get_string(NVS_CONFIG_STRATUM_USER);
+     module->fallback_pool_user = nvs_config_get_string(NVS_CONFIG_FALLBACK_STRATUM_USER);
+@@ -85,8 +93,8 @@ void SYSTEM_init_system(GlobalState * GLOBAL_STATE)
+     module->fallback_pool_pass = nvs_config_get_string(NVS_CONFIG_FALLBACK_STRATUM_PASS);
+ 
+     // set the pool difficulty
+-    module->pool_difficulty = nvs_config_get_u16(NVS_CONFIG_STRATUM_DIFFICULTY);
+-    module->fallback_pool_difficulty = nvs_config_get_u16(NVS_CONFIG_FALLBACK_STRATUM_DIFFICULTY);
++    module->pool_difficulty = nvs_config_get_float(NVS_CONFIG_STRATUM_DIFFICULTY);
++    module->fallback_pool_difficulty = nvs_config_get_float(NVS_CONFIG_FALLBACK_STRATUM_DIFFICULTY);
+ 
+     // set the pool extranonce subscribe
+     module->pool_extranonce_subscribe = nvs_config_get_bool(NVS_CONFIG_STRATUM_EXTRANONCE_SUBSCRIBE);
+@@ -354,6 +362,12 @@ void SYSTEM_notify_found_nonce(GlobalState * GLOBAL_STATE, double diff, uint8_t
+ {
+     SystemModule * module = &GLOBAL_STATE->SYSTEM_MODULE;
+ 
++#ifdef CONFIG_BITAXE_VIRTUAL
++    if (diff > module->virtual_best_session_nonce_diff) {
++        module->virtual_best_session_nonce_diff = diff;
++    }
++#endif
++
+     if ((uint64_t) diff > module->best_session_nonce_diff) {
+         module->best_session_nonce_diff = (uint64_t) diff;
+         suffixString((uint64_t) diff, module->best_session_diff_string, DIFF_STRING_SIZE, 0);
+@@ -367,9 +381,17 @@ void SYSTEM_notify_found_nonce(GlobalState * GLOBAL_STATE, double diff, uint8_t
+     }
+ 
+     if ((uint64_t) diff <= module->best_nonce_diff) {
++#ifdef CONFIG_BITAXE_VIRTUAL
++        if (diff > module->virtual_best_nonce_diff) {
++            module->virtual_best_nonce_diff = diff;
++        }
++#endif
+         return;
+     }
+     module->best_nonce_diff = (uint64_t) diff;
++#ifdef CONFIG_BITAXE_VIRTUAL
++    module->virtual_best_nonce_diff = diff;
++#endif
+ 
+     nvs_config_set_u64(NVS_CONFIG_BEST_DIFF, module->best_nonce_diff);
+ 
+diff --git a/main/tasks/asic_result_task.c b/main/tasks/asic_result_task.c
+index bc1fe79..bf0baab 100644
+--- a/main/tasks/asic_result_task.c
++++ b/main/tasks/asic_result_task.c
+@@ -8,6 +8,7 @@
+ #include "nvs_config.h"
+ #include "utils.h"
+ #include "stratum_task.h"
++#include "stratum_api.h"
+ #include "hashrate_monitor_task.h"
+ #include "asic.h"
+ #include "freertos/task.h"
+@@ -32,6 +33,9 @@ void ASIC_result_task(void *pvParameters)
+ 
+         if (asic_result == NULL)
+         {
++#ifdef CONFIG_BITAXE_VIRTUAL
++            vTaskDelay(1);
++#endif
+             continue;
+         }
+ 
+@@ -83,6 +87,21 @@ void ASIC_result_task(void *pvParameters)
+         {
+             char * user = GLOBAL_STATE->SYSTEM_MODULE.is_using_fallback ? GLOBAL_STATE->SYSTEM_MODULE.fallback_pool_user : GLOBAL_STATE->SYSTEM_MODULE.pool_user;
+ 
++#ifdef CONFIG_BITAXE_VIRTUAL
++            if (STRATUM_V1_submit_response_stalled()) {
++                ESP_LOGW(TAG, "Virtual submit response stalled; closing stratum transport");
++                taskENTER_CRITICAL(&GLOBAL_STATE->stratum_mux);
++                esp_transport_handle_t stalled_transport = GLOBAL_STATE->transport;
++                GLOBAL_STATE->transport = NULL;
++                taskEXIT_CRITICAL(&GLOBAL_STATE->stratum_mux);
++                if (stalled_transport != NULL) {
++                    esp_transport_close(stalled_transport);
++                }
++                vTaskDelay(1);
++                continue;
++            }
++#endif
++
+             taskENTER_CRITICAL(&GLOBAL_STATE->stratum_mux);
+             esp_transport_handle_t transport = GLOBAL_STATE->transport;
+             int uid = GLOBAL_STATE->send_uid++;
+@@ -115,10 +134,17 @@ void ASIC_result_task(void *pvParameters)
+         }
+ 
+         //log the ASIC response
++#ifdef CONFIG_BITAXE_VIRTUAL
++        ESP_LOGI(TAG, "ID: %s, ASIC nr: %d, Core: %d/%d, ver: %08" PRIX32 " Nonce %08" PRIX32 " diff %.8g of %g.", active_job->jobid, asic_result->asic_nr, asic_result->core_id, asic_result->small_core_id, asic_result->rolled_version, asic_result->nonce, nonce_diff, active_job->pool_diff);
++#else
+         ESP_LOGI(TAG, "ID: %s, ASIC nr: %d, Core: %d/%d, ver: %08" PRIX32 " Nonce %08" PRIX32 " diff %.1f of %g.", active_job->jobid, asic_result->asic_nr, asic_result->core_id, asic_result->small_core_id, asic_result->rolled_version, asic_result->nonce, nonce_diff, active_job->pool_diff);
++#endif
+ 
+         SYSTEM_notify_found_nonce(GLOBAL_STATE, nonce_diff, job_id);
+ 
+         scoreboard_add(&GLOBAL_STATE->SYSTEM_MODULE.scoreboard, nonce_diff, active_job->jobid, active_job->extranonce2, active_job->ntime, asic_result->nonce, version_bits);
++#ifdef CONFIG_BITAXE_VIRTUAL
++        vTaskDelay(1);
++#endif
+     }
+ }
+diff --git a/main/tasks/scoreboard.c b/main/tasks/scoreboard.c
+index b7ac88a..14f633e 100644
+--- a/main/tasks/scoreboard.c
++++ b/main/tasks/scoreboard.c
+@@ -65,8 +65,13 @@ esp_err_t scoreboard_add(Scoreboard *scoreboard, double difficulty, const char *
+     new_entry.job_id[sizeof(new_entry.job_id) - 1] = '\0';
+     strncpy(new_entry.extranonce2, extranonce2, sizeof(new_entry.extranonce2) - 1);
+     new_entry.extranonce2[sizeof(new_entry.extranonce2) - 1] = '\0';
++#ifdef CONFIG_BITAXE_VIRTUAL
++    const char *difficulty_format = "%.8g;%s;%s;%lu;%lu;%lu";
++#else
++    const char *difficulty_format = "%.1f;%s;%s;%lu;%lu;%lu";
++#endif
+     snprintf(new_entry.nvs_entry, sizeof(new_entry.nvs_entry),
+-        "%.1f;%s;%s;%lu;%lu;%lu", 
++        difficulty_format,
+         new_entry.difficulty, 
+         new_entry.job_id, 
+         new_entry.extranonce2,
+@@ -92,7 +97,11 @@ esp_err_t scoreboard_add(Scoreboard *scoreboard, double difficulty, const char *
+         return ESP_FAIL;
+     }
+     
++#ifdef CONFIG_BITAXE_VIRTUAL
++    ESP_LOGI(TAG, "New #%d: Difficulty: %.8g, Job ID: %s, extranonce2: %s, ntime: %d, nonce: %08X, version_bits: %08X",
++#else
+     ESP_LOGI(TAG, "New #%d: Difficulty: %.1f, Job ID: %s, extranonce2: %s, ntime: %d, nonce: %08X, version_bits: %08X",
++#endif
+         i+1, new_entry.difficulty, new_entry.job_id, new_entry.extranonce2, new_entry.ntime, (unsigned int)new_entry.nonce, (unsigned int)new_entry.version_bits);
+ 
+     return ESP_OK;
+diff --git a/main/tasks/stratum_task.c b/main/tasks/stratum_task.c
+index 576d1cd..620e300 100644
+--- a/main/tasks/stratum_task.c
++++ b/main/tasks/stratum_task.c
+@@ -37,6 +37,7 @@
+ #define STRATUM_DIFFICULTY CONFIG_STRATUM_DIFFICULTY
+ 
+ #define TRANSPORT_TIMEOUT_MS 5000
++#define VIRTUAL_AUTHORIZE_SETTLE_US (5LL * 1000 * 1000)
+ 
+ #define BUFFER_SIZE 1024
+ 
+@@ -61,7 +62,11 @@ struct timeval tcp_snd_timeout = {
+ };
+ 
+ struct timeval tcp_rcv_timeout = {
++#ifdef CONFIG_BITAXE_VIRTUAL
++    .tv_sec = 5,
++#else
+     .tv_sec = 60 * 3,
++#endif
+     .tv_usec = 0
+ };
+ 
+@@ -260,6 +265,9 @@ void stratum_reset_uid(GlobalState * GLOBAL_STATE)
+     taskENTER_CRITICAL(&GLOBAL_STATE->stratum_mux);
+     GLOBAL_STATE->send_uid = 1;
+     taskEXIT_CRITICAL(&GLOBAL_STATE->stratum_mux);
++#ifdef CONFIG_BITAXE_VIRTUAL
++    STRATUM_V1_reset_request_timings();
++#endif
+ }
+ 
+ void stratum_close_connection(GlobalState * GLOBAL_STATE)
+@@ -329,7 +337,11 @@ void stratum_primary_heartbeat(void * pvParameters)
+         set_socket_options(transport);
+ 
+         int send_uid = 1;
+-        STRATUM_V1_subscribe(transport, send_uid++, GLOBAL_STATE->DEVICE_CONFIG.family.asic.name);
++        STRATUM_V1_subscribe(
++            transport,
++            send_uid++,
++            GLOBAL_STATE->DEVICE_CONFIG.family.asic.name,
++            GLOBAL_STATE->SYSTEM_MODULE.pool_subscribe_agent);
+         STRATUM_V1_authorize(transport, send_uid++, GLOBAL_STATE->SYSTEM_MODULE.pool_user, GLOBAL_STATE->SYSTEM_MODULE.pool_pass);
+ 
+         char recv_buffer[BUFFER_SIZE];
+@@ -500,6 +532,12 @@ void stratum_task(void * pvParameters)
+ 
+         stratum_url = GLOBAL_STATE->SYSTEM_MODULE.is_using_fallback ? GLOBAL_STATE->SYSTEM_MODULE.fallback_pool_url : GLOBAL_STATE->SYSTEM_MODULE.pool_url;
+         port = GLOBAL_STATE->SYSTEM_MODULE.is_using_fallback ? GLOBAL_STATE->SYSTEM_MODULE.fallback_pool_port : GLOBAL_STATE->SYSTEM_MODULE.pool_port;
++        char * subscribe_agent = GLOBAL_STATE->SYSTEM_MODULE.is_using_fallback ? GLOBAL_STATE->SYSTEM_MODULE.fallback_pool_subscribe_agent : GLOBAL_STATE->SYSTEM_MODULE.pool_subscribe_agent;
++
++#ifdef CONFIG_BITAXE_VIRTUAL
++        STRATUM_V1_set_submit_response_timeout_enabled(
++            GLOBAL_STATE->DEVICE_CONFIG.family.asic.id == ASIC_VIRTUAL);
++#endif
+ 
+         stratum_connection_info_t conn_info;
+         if (resolve_stratum_address(stratum_url, port, &conn_info) != ESP_OK) {
+@@ -569,21 +607,48 @@ void stratum_task(void * pvParameters)
+         STRATUM_V1_configure_version_rolling(GLOBAL_STATE->transport, stratum_get_next_uid(GLOBAL_STATE), &GLOBAL_STATE->version_mask);
+ 
+         // mining.subscribe - ID: 2
+-        STRATUM_V1_subscribe(GLOBAL_STATE->transport, stratum_get_next_uid(GLOBAL_STATE), GLOBAL_STATE->DEVICE_CONFIG.family.asic.name);
++        STRATUM_V1_subscribe(
++            GLOBAL_STATE->transport,
++            stratum_get_next_uid(GLOBAL_STATE),
++            GLOBAL_STATE->DEVICE_CONFIG.family.asic.name,
++            subscribe_agent);
++
++        float difficulty = GLOBAL_STATE->SYSTEM_MODULE.is_using_fallback ? GLOBAL_STATE->SYSTEM_MODULE.fallback_pool_difficulty : GLOBAL_STATE->SYSTEM_MODULE.pool_difficulty;
++#ifdef CONFIG_BITAXE_VIRTUAL
++        bool suggest_difficulty_sent = false;
++        // NerdMiner-compatible pools can apply suggested difficulty before authorize.
++        if (GLOBAL_STATE->DEVICE_CONFIG.family.asic.id == ASIC_VIRTUAL &&
++            subscribe_agent != NULL && subscribe_agent[0] != '\0' && difficulty > 0) {
++            STRATUM_V1_suggest_difficulty(GLOBAL_STATE->transport, stratum_get_next_uid(GLOBAL_STATE), difficulty);
++            suggest_difficulty_sent = true;
++        }
++#endif
+ 
+         char * username = GLOBAL_STATE->SYSTEM_MODULE.is_using_fallback ? GLOBAL_STATE->SYSTEM_MODULE.fallback_pool_user : GLOBAL_STATE->SYSTEM_MODULE.pool_user;
+         char * password = GLOBAL_STATE->SYSTEM_MODULE.is_using_fallback ? GLOBAL_STATE->SYSTEM_MODULE.fallback_pool_pass : GLOBAL_STATE->SYSTEM_MODULE.pool_pass;
+ 
+         int authorize_message_id = stratum_get_next_uid(GLOBAL_STATE);
++        int64_t authorize_sent_us;
++        bool authorized = false;
+ 
+-        //mining.authorize - ID: 3
++        // mining.authorize
+         STRATUM_V1_authorize(GLOBAL_STATE->transport, authorize_message_id, username, password);
++        authorize_sent_us = esp_timer_get_time();
+ 
+         while (1) {
+             char * line = STRATUM_V1_receive_jsonrpc_line(GLOBAL_STATE->transport);
+             if (!line) {
+-                ESP_LOGE(TAG, "Failed to receive JSON-RPC line, reconnecting...");
++#ifdef CONFIG_BITAXE_VIRTUAL
++                bool submit_response_timeout = STRATUM_V1_consume_submit_response_timeout();
++                if (submit_response_timeout) {
++                    ESP_LOGW(TAG, "Virtual submit response timeout; reconnecting current pool");
++                } else {
++                    retry_attempts++;
++                }
++#else
+                 retry_attempts++;
++#endif
++                ESP_LOGE(TAG, "Failed to receive JSON-RPC line, reconnecting...");
+                 stratum_close_connection(GLOBAL_STATE);
+                 break;
+             }
+@@ -602,4 +647,14 @@ void stratum_task(void * pvParameters)
+             free(line);
+ 
+             if (stratum_api_v1_message.method == MINING_NOTIFY) {
++#ifdef CONFIG_BITAXE_VIRTUAL
++                if (GLOBAL_STATE->DEVICE_CONFIG.family.asic.id == ASIC_VIRTUAL && !authorized) {
++                    int64_t elapsed_us = esp_timer_get_time() - authorize_sent_us;
++                    if (elapsed_us < VIRTUAL_AUTHORIZE_SETTLE_US) {
++                        int64_t wait_us = VIRTUAL_AUTHORIZE_SETTLE_US - elapsed_us;
++                        ESP_LOGI(TAG, "Virtual mining notify waiting %lld ms for authorize settle", wait_us / 1000);
++                        vTaskDelay((wait_us / 1000) / portTICK_PERIOD_MS);
++                    }
++                }
++#endif
+                 GLOBAL_STATE->SYSTEM_MODULE.work_received++;
+@@ -666,8 +726,14 @@ void stratum_task(void * pvParameters)
+                 retry_attempts = 0;
+                 if (stratum_api_v1_message.response_success) {
+                     ESP_LOGI(TAG, "setup message accepted");
+-                    uint16_t difficulty = GLOBAL_STATE->SYSTEM_MODULE.is_using_fallback ? GLOBAL_STATE->SYSTEM_MODULE.fallback_pool_difficulty : GLOBAL_STATE->SYSTEM_MODULE.pool_difficulty;
+-                    if (stratum_api_v1_message.message_id == authorize_message_id && difficulty > 0) {
++                    if (stratum_api_v1_message.message_id == authorize_message_id) {
++                        authorized = true;
++                    }
++                    if (stratum_api_v1_message.message_id == authorize_message_id && difficulty > 0
++#ifdef CONFIG_BITAXE_VIRTUAL
++                        && !suggest_difficulty_sent
++#endif
++                    ) {
+                         STRATUM_V1_suggest_difficulty(GLOBAL_STATE->transport, stratum_get_next_uid(GLOBAL_STATE), difficulty);
+                     }
+                     bool extranonce_subscribe = GLOBAL_STATE->SYSTEM_MODULE.is_using_fallback ? GLOBAL_STATE->SYSTEM_MODULE.fallback_pool_extranonce_subscribe : GLOBAL_STATE->SYSTEM_MODULE.pool_extranonce_subscribe;
+-- 
+2.50.1 (Apple Git-155)

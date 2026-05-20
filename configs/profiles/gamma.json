@@ -1,0 +1,30 @@
+{
+  "id": "gamma",
+  "displayName": "Bitaxe Gamma",
+  "boardVersion": "virtual-gamma",
+  "deviceModel": "Gamma",
+  "asicModel": "BM1370",
+  "asicCount": 1,
+  "nominalVoltage": 5,
+  "voltageDomains": 1,
+  "maxPower": 40,
+  "powerOffset": 5,
+  "swarmColor": "green",
+  "powerConsumptionTarget": 19,
+  "temperatureTarget": 45,
+  "sensors": {
+    "plugSense": false,
+    "asicEnable": false,
+    "EMC2101": true,
+    "EMC2103": false,
+    "EMC2302": false,
+    "emcInternalTemp": false,
+    "emcIdealityFactor": 36,
+    "emcBetaCompensation": 0,
+    "tempOffset": 0,
+    "DS4432U": false,
+    "INA260": false,
+    "TPS546": true,
+    "TMP1075": false
+  }
+}

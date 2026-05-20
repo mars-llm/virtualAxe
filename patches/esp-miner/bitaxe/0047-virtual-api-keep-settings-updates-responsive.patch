@@ -1,0 +1,202 @@
+From d811457946fc2ba1d8ceffee4ddd28a99e4e40f9 Mon Sep 17 00:00:00 2001
+From: virtualAxe <virtualaxe@example.invalid>
+Date: Wed, 6 May 2026 12:37:21 +0200
+Subject: [PATCH 12/13] virtual api: keep settings updates responsive
+
+Why: coalesce queued NVS writes so AxeOS settings updates stay responsive during
+QEMU mining while preserving persisted values.
+Virtual-only: required by virtual runtime timing; the NVS cache and commit
+semantics remain API-compatible.
+Upstream surface: HTTP PATCH completion and NVS update queue processing.
+Verify: run API settings tests and verify-persistence.
+Removal impact: settings updates can block long enough to degrade AxeOS and pool
+configuration flows.
+
+---
+ main/http_server/http_server.c |   2 +-
+ main/nvs_config.c              | 151 ++++++++++++++++++---------------
+ 2 files changed, 85 insertions(+), 68 deletions(-)
+
+diff --git a/main/http_server/http_server.c b/main/http_server/http_server.c
+index ca50295..c82f1dc 100644
+--- a/main/http_server/http_server.c
++++ b/main/http_server/http_server.c
+@@ -708,7 +708,7 @@ static esp_err_t PATCH_update_settings(httpd_req_t * req)
+     }
+ 
+     cJSON_Delete(root);
+-    httpd_resp_send_chunk(req, NULL, 0);
++    httpd_resp_send(req, NULL, 0);
+     return ESP_OK;
+ }
+ 
+diff --git a/main/nvs_config.c b/main/nvs_config.c
+index 98b2888..df1bd86 100644
+--- a/main/nvs_config.c
++++ b/main/nvs_config.c
+@@ -177,79 +177,96 @@ static void nvs_config_apply_fallback(NvsConfigKey key, Settings * setting)
+     }
+ }
+ 
++static bool nvs_config_apply_update(ConfigUpdate *update)
++{
++    Settings *setting = nvs_config_get_settings(update->key);
++    if (!setting || setting->type != update->type) {
++        if (update->type == TYPE_STR) {
++            free(update->value.str);
++        }
++        return false;
++    }
++
++    esp_err_t ret = ESP_OK;
++
++    char key[NVS_KEY_NAME_MAX_SIZE];
++    get_nvs_key_name(setting, update->index, key);
++
++    // NVS flash write is AFTER releasing the mutex so getters are never blocked
++    char *old_str = NULL;
++    char nvs_str_buf[32]; // for TYPE_FLOAT serialisation
++    xSemaphoreTake(nvs_cache_mutex, portMAX_DELAY);
++    switch (update->type) {
++        case TYPE_STR:
++            old_str = setting->value[update->index].str;
++            setting->value[update->index].str = update->value.str;
++            break;
++        case TYPE_U16:
++            setting->value[update->index].u16 = update->value.u16;
++            break;
++        case TYPE_I32:
++            setting->value[update->index].i32 = update->value.i32;
++            break;
++        case TYPE_U64:
++            setting->value[update->index].u64 = update->value.u64;
++            break;
++        case TYPE_FLOAT:
++            setting->value[update->index].f = update->value.f;
++            snprintf(nvs_str_buf, sizeof(nvs_str_buf), "%f", update->value.f);
++            break;
++        case TYPE_BOOL:
++            setting->value[update->index].b = update->value.b;
++            break;
++    }
++    xSemaphoreGive(nvs_cache_mutex);
++
++    switch (update->type) {
++        case TYPE_STR:
++            ret = nvs_set_str(handle, key, update->value.str);
++            break;
++        case TYPE_U16:
++            ret = nvs_set_u16(handle, key, update->value.u16);
++            break;
++        case TYPE_I32:
++            ret = nvs_set_i32(handle, key, update->value.i32);
++            break;
++        case TYPE_U64:
++            ret = nvs_set_u64(handle, key, update->value.u64);
++            break;
++        case TYPE_FLOAT:
++            ret = nvs_set_str(handle, key, nvs_str_buf);
++            break;
++        case TYPE_BOOL:
++            ret = nvs_set_u16(handle, key, update->value.b ? 1 : 0);
++            break;
++    }
++
++    nvs_config_apply_fallback(update->key, setting);
++
++    if (old_str) free(old_str);
++
++    if (ret != ESP_OK) {
++        ESP_LOGE(TAG, "Failed to apply queued update for key %d: %s", update->key, esp_err_to_name(ret));
++        return false;
++    }
++    return true;
++}
++
+ static void nvs_task(void *pvParameters)
+ {
+     while (1) {
+         ConfigUpdate update;
+         if (xQueueReceive(nvs_save_queue, &update, portMAX_DELAY) == pdTRUE) {
+-            Settings *setting = nvs_config_get_settings(update.key);
+-            if (setting && setting->type == update.type) {
+-                esp_err_t ret = ESP_OK;
+-
+-                char key[NVS_KEY_NAME_MAX_SIZE];
+-                get_nvs_key_name(setting, update.index, key);
+-
+-                // NVS flash write is AFTER releasing the mutex so getters are never blocked
+-                char *old_str = NULL;
+-                char nvs_str_buf[32]; // for TYPE_FLOAT serialisation
+-                xSemaphoreTake(nvs_cache_mutex, portMAX_DELAY);
+-                switch (update.type) {
+-                    case TYPE_STR:
+-                        old_str = setting->value[update.index].str;
+-                        setting->value[update.index].str = update.value.str;
+-                        break;
+-                    case TYPE_U16:
+-                        setting->value[update.index].u16 = update.value.u16;
+-                        break;
+-                    case TYPE_I32:
+-                        setting->value[update.index].i32 = update.value.i32;
+-                        break;
+-                    case TYPE_U64:
+-                        setting->value[update.index].u64 = update.value.u64;
+-                        break;
+-                    case TYPE_FLOAT:
+-                        setting->value[update.index].f = update.value.f;
+-                        snprintf(nvs_str_buf, sizeof(nvs_str_buf), "%f", update.value.f);
+-                        break;
+-                    case TYPE_BOOL:
+-                        setting->value[update.index].b = update.value.b;
+-                        break;
+-                }
+-                xSemaphoreGive(nvs_cache_mutex);
+-
+-                switch (update.type) {
+-                    case TYPE_STR:
+-                        ret = nvs_set_str(handle, key, update.value.str);
+-                        break;
+-                    case TYPE_U16:
+-                        ret = nvs_set_u16(handle, key, update.value.u16);
+-                        break;
+-                    case TYPE_I32:
+-                        ret = nvs_set_i32(handle, key, update.value.i32);
+-                        break;
+-                    case TYPE_U64:
+-                        ret = nvs_set_u64(handle, key, update.value.u64);
+-                        break;
+-                    case TYPE_FLOAT:
+-                        ret = nvs_set_str(handle, key, nvs_str_buf);
+-                        break;
+-                    case TYPE_BOOL:
+-                        ret = nvs_set_u16(handle, key, update.value.b ? 1 : 0);
+-                        break;
+-                }
+-
+-                nvs_config_apply_fallback(update.key, setting);
+-
+-                if (ret == ESP_OK) {
+-                    ret = nvs_commit(handle);
+-                    if (ret != ESP_OK) {
+-                        ESP_LOGE(TAG, "Failed to commit data to NVS");
+-                    }
++            bool pending_commit = false;
++            do {
++                pending_commit = nvs_config_apply_update(&update) || pending_commit;
++            } while (xQueueReceive(nvs_save_queue, &update, 0) == pdTRUE);
++
++            if (pending_commit) {
++                esp_err_t ret = nvs_commit(handle);
++                if (ret != ESP_OK) {
++                    ESP_LOGE(TAG, "Failed to commit data to NVS");
+                 }
+-                if (old_str) free(old_str);
+-            } 
+-            else if (update.type == TYPE_STR) {
+-                free(update.value.str);
+             }
+         }
+     }
+-- 
+2.50.1 (Apple Git-155)

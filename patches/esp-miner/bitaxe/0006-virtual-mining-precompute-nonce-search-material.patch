@@ -1,0 +1,236 @@
+From 4901cd485955e6985c42025ff9d24acbe6c8a6a4 Mon Sep 17 00:00:00 2001
+From: virtualAxe <virtualaxe@example.invalid>
+Date: Wed, 6 May 2026 12:37:21 +0200
+Subject: [PATCH 06/13] virtual mining: precompute nonce search material
+
+Why: precompute reusable SHA-256 header material so guest-side nonce search can
+make progress under QEMU without moving proof-of-work to the host.
+Virtual-only: all changes are inside the virtual ASIC search implementation.
+Upstream surface: virtual ASIC header cache, SHA compression helpers, and
+candidate diff calculation.
+Verify: run make verify-submit-replay and verify-test-ci.
+Removal impact: low-difficulty guest mining becomes too slow for reliable local
+and remote submit evidence.
+
+---
+ components/asic/virtual_asic.c | 166 +++++++++++++++++++++++++++++++--
+ 1 file changed, 157 insertions(+), 9 deletions(-)
+
+diff --git a/components/asic/virtual_asic.c b/components/asic/virtual_asic.c
+index 9822dfa..421b44a 100644
+--- a/components/asic/virtual_asic.c
++++ b/components/asic/virtual_asic.c
+@@ -15,7 +15,10 @@
+ 
+ #define BITCOIN_HEADER_SIZE 80
+ #define BITCOIN_HEADER_TEMPLATE_SIZE 76
++#define BITCOIN_HEADER_SUFFIX_SIZE 12
+ #define VIRTUAL_MAX_ROLLED_VERSIONS 4
++#define BYTESWAP32(v) __builtin_bswap32(v)
++#define RROT32(v, s) (((v) >> (s)) | ((v) << (32 - (s))))
+ 
+ typedef struct
+ {
+@@ -23,7 +26,8 @@ typedef struct
+     uint32_t starting_nonce;
+     uint8_t version_count;
+     uint32_t rolled_versions[VIRTUAL_MAX_ROLLED_VERSIONS];
+-    uint8_t header_templates[VIRTUAL_MAX_ROLLED_VERSIONS][BITCOIN_HEADER_TEMPLATE_SIZE];
++    uint32_t first_block_midstates[VIRTUAL_MAX_ROLLED_VERSIONS][8];
++    uint8_t header_suffixes[VIRTUAL_MAX_ROLLED_VERSIONS][BITCOIN_HEADER_SUFFIX_SIZE];
+     double pool_diff;
+     char jobid[96];
+ } virtual_job_snapshot_t;
+@@ -33,6 +37,28 @@ static const uint32_t SEARCH_YIELD_INTERVAL = 0xFFFF;
+ static const UBaseType_t WORKER_TASK_PRIORITY = 4;
+ static const BaseType_t WORKER_TASK_CORE = 1;
+ static const double TRUEDIFF_ONE = 26959535291011309493156476344723991336010898738574164086137773096960.0;
++static const uint32_t SHA256_H0[8] = {
++    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
++    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
++};
++static const uint32_t SHA256_K[64] = {
++    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
++    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
++    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
++    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
++    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
++    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
++    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
++    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
++    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
++    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
++    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
++    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
++    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
++    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
++    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
++    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
++};
+ 
+ static QueueHandle_t job_queue = NULL;
+ static QueueHandle_t result_queue = NULL;
+@@ -71,14 +97,128 @@ static void build_header_template(uint8_t header_template[BITCOIN_HEADER_TEMPLAT
+     memcpy(header_template + 72, &source->target, sizeof(source->target));
+ }
+ 
+-static double virtual_job_diff_for_nonce(const uint8_t header_template[BITCOIN_HEADER_TEMPLATE_SIZE], uint32_t nonce)
++static uint32_t load_be32(const uint8_t * data)
+ {
+-    uint8_t header[BITCOIN_HEADER_SIZE];
+-    uint8_t hash_result[32];
++    return ((uint32_t)data[0] << 24)
++        | ((uint32_t)data[1] << 16)
++        | ((uint32_t)data[2] << 8)
++        | (uint32_t)data[3];
++}
++
++static void sha256_compress(uint32_t state[8], const uint8_t block[64])
++{
++    uint32_t w[64];
++    for (int i = 0; i < 16; i++) {
++        w[i] = load_be32(block + (i * 4));
++    }
++    for (int i = 16; i < 64; i++) {
++        uint32_t s0 = RROT32(w[i - 15], 7) ^ RROT32(w[i - 15], 18) ^ (w[i - 15] >> 3);
++        uint32_t s1 = RROT32(w[i - 2], 17) ^ RROT32(w[i - 2], 19) ^ (w[i - 2] >> 10);
++        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
++    }
++
++    uint32_t a = state[0];
++    uint32_t b = state[1];
++    uint32_t c = state[2];
++    uint32_t d = state[3];
++    uint32_t e = state[4];
++    uint32_t f = state[5];
++    uint32_t g = state[6];
++    uint32_t h = state[7];
++
++    for (int i = 0; i < 64; i++) {
++        uint32_t s1 = RROT32(e, 6) ^ RROT32(e, 11) ^ RROT32(e, 25);
++        uint32_t ch = (e & f) ^ ((~e) & g);
++        uint32_t temp1 = h + s1 + ch + SHA256_K[i] + w[i];
++        uint32_t s0 = RROT32(a, 2) ^ RROT32(a, 13) ^ RROT32(a, 22);
++        uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
++        uint32_t temp2 = s0 + maj;
++
++        h = g;
++        g = f;
++        f = e;
++        e = d + temp1;
++        d = c;
++        c = b;
++        b = a;
++        a = temp1 + temp2;
++    }
++
++    state[0] += a;
++    state[1] += b;
++    state[2] += c;
++    state[3] += d;
++    state[4] += e;
++    state[5] += f;
++    state[6] += g;
++    state[7] += h;
++}
+ 
+-    memcpy(header, header_template, BITCOIN_HEADER_TEMPLATE_SIZE);
+-    memcpy(header + BITCOIN_HEADER_TEMPLATE_SIZE, &nonce, sizeof(nonce));
+-    double_sha256_bin(header, sizeof(header), hash_result);
++static void prepare_header_midstate(
++    uint32_t first_block_midstate[8],
++    uint8_t header_suffix[BITCOIN_HEADER_SUFFIX_SIZE],
++    const uint8_t header_template[BITCOIN_HEADER_TEMPLATE_SIZE]
++)
++{
++    memcpy(first_block_midstate, SHA256_H0, sizeof(uint32_t) * 8);
++    sha256_compress(first_block_midstate, header_template);
++    memcpy(header_suffix, header_template + 64, BITCOIN_HEADER_SUFFIX_SIZE);
++}
++
++static bool double_sha256_header_hash(
++    const uint32_t first_block_midstate[8],
++    const uint8_t header_suffix[BITCOIN_HEADER_SUFFIX_SIZE],
++    uint32_t nonce,
++    uint8_t hash_result[32]
++)
++{
++    uint8_t second_block[64] = {0};
++    uint8_t second_hash_block[64] = {0};
++    uint32_t state[8];
++    uint32_t second_hash_state[8];
++    uint8_t first_hash[32];
++
++    memcpy(state, first_block_midstate, sizeof(uint32_t) * 8);
++    memcpy(second_block, header_suffix, BITCOIN_HEADER_SUFFIX_SIZE);
++    memcpy(second_block + BITCOIN_HEADER_SUFFIX_SIZE, &nonce, sizeof(nonce));
++    second_block[16] = 0x80;
++    second_block[62] = 0x02;
++    second_block[63] = 0x80;
++    sha256_compress(state, second_block);
++
++    for (int i = 0; i < 8; i++) {
++        uint32_t word = BYTESWAP32(state[i]);
++        memcpy(first_hash + (i * 4), &word, sizeof(word));
++    }
++
++    memcpy(second_hash_block, first_hash, sizeof(first_hash));
++    second_hash_block[32] = 0x80;
++    second_hash_block[62] = 0x01;
++    second_hash_block[63] = 0x00;
++    memcpy(second_hash_state, SHA256_H0, sizeof(second_hash_state));
++    sha256_compress(second_hash_state, second_hash_block);
++
++    if ((second_hash_state[7] & 0xFFFF) != 0) {
++        return false;
++    }
++
++    for (int i = 0; i < 8; i++) {
++        uint32_t word = BYTESWAP32(second_hash_state[i]);
++        memcpy(hash_result + (i * 4), &word, sizeof(word));
++    }
++    return true;
++}
++
++static double virtual_job_diff_for_nonce(
++    const uint32_t first_block_midstate[8],
++    const uint8_t header_suffix[BITCOIN_HEADER_SUFFIX_SIZE],
++    uint32_t nonce
++)
++{
++    uint8_t hash_result[32];
++    if (!double_sha256_header_hash(first_block_midstate, header_suffix, nonce, hash_result)) {
++        return 0.0;
++    }
+ 
+     double value = le256todouble(hash_result);
+     if (value == 0.0) {
+@@ -92,7 +232,13 @@ static bool virtual_job_test_nonce(const virtual_job_snapshot_t * snapshot, uint
+ {
+     for (uint8_t i = 0; i < snapshot->version_count; i++) {
+         (*attempts)++;
+-        if (virtual_job_diff_for_nonce(snapshot->header_templates[i], nonce) >= snapshot->pool_diff) {
++        if (
++            virtual_job_diff_for_nonce(
++                snapshot->first_block_midstates[i],
++                snapshot->header_suffixes[i],
++                nonce
++            ) >= snapshot->pool_diff
++        ) {
+             *rolled_version = snapshot->rolled_versions[i];
+             return true;
+         }
+@@ -185,8 +331,10 @@ static void copy_job_snapshot(virtual_job_snapshot_t * snapshot, uint8_t job_id,
+ 
+     uint32_t rolled_version = source->version;
+     for (uint8_t i = 0; i < version_count; i++) {
++        uint8_t header_template[BITCOIN_HEADER_TEMPLATE_SIZE];
+         snapshot->rolled_versions[i] = rolled_version;
+-        build_header_template(snapshot->header_templates[i], rolled_version, source);
++        build_header_template(header_template, rolled_version, source);
++        prepare_header_midstate(snapshot->first_block_midstates[i], snapshot->header_suffixes[i], header_template);
+         snapshot->version_count++;
+ 
+         if (i + 1 < version_count) {
+-- 
+2.50.1 (Apple Git-155)

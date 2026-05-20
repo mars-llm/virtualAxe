@@ -1,0 +1,673 @@
+From 5b50f4f678a83198d535917a04823a5ccfe18285 Mon Sep 17 00:00:00 2001
+From: virtualAxe <virtualaxe@example.invalid>
+Date: Mon, 11 May 2026 10:31:20 +0200
+Subject: [PATCH] nerdnos: add virtual asic submit path
+
+Why: move the NerdNos source from API-only boot to deterministic guest-side submit replay by adding a virtual BM1370 ASIC implementation that feeds the native sendWork/processWork/test_nonce_value boundary.
+
+Virtual-only: selected by BOARD=VIRTUALAXE_GAMMA; physical NerdNos boards keep their existing ASIC classes and startup path.
+
+Upstream surface: BM1397 ASIC interface virtual dispatch, virtual ASIC worker, stale-job generation IDs, fractional Stratum V1 difficulty parsing, virtual board ASIC initialization, and the virtual startup task list.
+
+Verify: SOURCE=nerdnos make patch-check, python3 scripts/virtualaxe.py build --source nerdnos --profile gamma --json, and make verify-submit-replay SOURCE=nerdnos.
+
+Removal impact: NerdNos remains API-boot-only and cannot prove the upstream submit boundary with deterministic replay.
+---
+ components/bm1397/CMakeLists.txt         |   1 +
+ components/bm1397/asic.cpp               |   2 +
+ components/bm1397/include/asic.h         |   8 +-
+ components/bm1397/include/mining.h       |   4 +-
+ components/bm1397/include/virtual_asic.h |  27 +++
+ components/bm1397/virtual_asic.cpp       | 257 +++++++++++++++++++++++
+ main/boards/virtualaxe_gamma.cpp         |  15 +-
+ main/main.cpp                            |  11 +-
+ main/stratum/stratum_api.cpp             |   2 +-
+ main/stratum/stratum_api.h               |   4 +-
+ main/stratum/stratum_manager.cpp         |   5 +-
+ main/stratum/stratum_task.cpp            |   5 +
+ main/tasks/asic_jobs.h                   |  11 +-
+ main/tasks/asic_result_task.cpp          |  12 +-
+ main/tasks/create_jobs_task.cpp          |   8 +-
+ main/tasks/create_jobs_task.h            |   2 +-
+ 16 files changed, 337 insertions(+), 23 deletions(-)
+ create mode 100644 components/bm1397/include/virtual_asic.h
+ create mode 100644 components/bm1397/virtual_asic.cpp
+
+diff --git a/components/bm1397/CMakeLists.txt b/components/bm1397/CMakeLists.txt
+index 4a83107e..ed43b0e9 100644
+--- a/components/bm1397/CMakeLists.txt
++++ b/components/bm1397/CMakeLists.txt
+@@ -8,6 +8,7 @@ SRCS
+     "crc.cpp"
+     "mining_utils.cpp"
+     "mining.cpp"
++    "virtual_asic.cpp"
+
+ INCLUDE_DIRS
+     "include"
+diff --git a/components/bm1397/asic.cpp b/components/bm1397/asic.cpp
+index f13acc08..b3ce3aee 100644
+--- a/components/bm1397/asic.cpp
++++ b/components/bm1397/asic.cpp
+@@ -331,6 +331,7 @@ uint8_t Asic::sendWork(uint32_t job_id, bm_job *next_bm_job)
+ {
+     BM1368_job job;
+
++    next_bm_job->generation_id = 0;
+     job.job_id = jobToAsicId(job_id);
+
+     job.num_midstates = 0x01;
+@@ -395,6 +396,7 @@ bool Asic::processWork(task_result *result)
+     int asic_nr = (m_addressInterval > 0) ? ((uint8_t)((nonce_h >> 17) & 0xff) / m_addressInterval) : 0;
+
+     result->job_id = job_id;
++    result->generation_id = 0;
+     result->asic_nr = asic_nr;
+     result->nonce = asic_result.nonce;
+     result->rolled_version = rolled_version;
+diff --git a/components/bm1397/include/asic.h b/components/bm1397/include/asic.h
+index ab91a32b..5df9e1ae 100644
+--- a/components/bm1397/include/asic.h
++++ b/components/bm1397/include/asic.h
+@@ -63,6 +63,7 @@ static inline int next_power_of_two(int num) {
+ typedef struct
+ {
+     uint8_t job_id;
++    uint32_t generation_id;
+     uint32_t nonce;
+     uint32_t rolled_version;
+     int asic_nr;
+@@ -117,9 +118,9 @@ protected:
+ public:
+     Asic();
+     virtual const char* getName() = 0;
+-    uint8_t sendWork(uint32_t job_id, bm_job *next_bm_job);
+-    bool processWork(task_result *result);
+-    void setJobDifficultyMask(int difficulty);
++    virtual uint8_t sendWork(uint32_t job_id, bm_job *next_bm_job);
++    virtual bool processWork(task_result *result);
++    virtual void setJobDifficultyMask(int difficulty);
+     bool setAsicFrequency(float frequency);
+     virtual void requestChipTemp();
+     virtual void resetCounter(uint8_t reg);
+@@ -133,4 +134,3 @@ public:
+     virtual int setMaxBaud(void);
+ };
+
+-
+diff --git a/components/bm1397/include/mining.h b/components/bm1397/include/mining.h
+index c8b20b52..243ff822 100644
+--- a/components/bm1397/include/mining.h
++++ b/components/bm1397/include/mining.h
+@@ -15,7 +15,7 @@ typedef struct
+     uint32_t starting_nonce;
+
+     // real stratum pool difficulty
+-    uint32_t pool_diff;
++    double pool_diff;
+
+     // effective asic difficulty
+     // is limited to [ASIC_MIN_DIFFICULTY...ASIC_MAX_DIFFICULTY]
+@@ -23,6 +23,7 @@ typedef struct
+
+     // pool ID
+     int pool_id;
++    uint32_t generation_id;
+
+     char *jobid;
+     char *extranonce2;
+@@ -40,4 +41,3 @@ void construct_bm_job(mining_notify *params, const char *merkle_root, const uint
+ double test_nonce_value(const bm_job *job, const uint32_t nonce, const uint32_t rolled_version);
+
+ char *extranonce_2_generate(uint32_t extranonce_2, uint32_t length);
+-
+diff --git a/components/bm1397/include/virtual_asic.h b/components/bm1397/include/virtual_asic.h
+new file mode 100644
+index 00000000..626409b0
+--- /dev/null
++++ b/components/bm1397/include/virtual_asic.h
+@@ -0,0 +1,27 @@
++#pragma once
++
++#include "asic.h"
++
++class VirtualAsic : public Asic {
++  private:
++    uint8_t m_nextJobId = 0;
++    uint32_t m_nextGenerationId = 0;
++
++    uint8_t allocateJobId();
++    uint32_t allocateGenerationId();
++
++  protected:
++    const uint8_t* getChipId() override;
++    uint8_t jobToAsicId(uint8_t job_id) override;
++    uint8_t asicToJobId(uint8_t asic_id) override;
++    uint8_t nonceToAsicNr(uint32_t nonce) override;
++
++  public:
++    const char* getName() override;
++    uint8_t init(uint64_t frequency, uint16_t asic_count, uint32_t difficulty, uint32_t vrFrequency) override;
++    uint8_t sendWork(uint32_t job_id, bm_job *next_bm_job) override;
++    bool processWork(task_result *result) override;
++    void setJobDifficultyMask(int difficulty) override;
++    uint16_t getSmallCoreCount() override;
++    uint32_t getDefaultVrFrequency() override;
++};
+diff --git a/components/bm1397/virtual_asic.cpp b/components/bm1397/virtual_asic.cpp
+new file mode 100644
+index 00000000..bc67f429
+--- /dev/null
++++ b/components/bm1397/virtual_asic.cpp
+@@ -0,0 +1,257 @@
++#include "virtual_asic.h"
++
++#include <limits.h>
++#include <stdint.h>
++#include <string.h>
++
++#include "esp_log.h"
++#include "freertos/FreeRTOS.h"
++#include "freertos/queue.h"
++#include "freertos/task.h"
++#include "mining.h"
++
++static const char *TAG = "virtual_asic";
++static const uint32_t SEARCH_YIELD_INTERVAL = 0x3ff;
++static const UBaseType_t WORKER_TASK_PRIORITY = 4;
++static const uint8_t VIRTUAL_VERSION_COUNT = 4;
++static const uint8_t VIRTUAL_MAX_ASIC_JOBS = 128;
++
++typedef struct
++{
++    uint8_t job_id;
++    uint32_t generation_id;
++    uint32_t starting_nonce;
++    uint8_t version_count;
++    uint32_t rolled_versions[VIRTUAL_VERSION_COUNT];
++    bm_job job;
++    char jobid[96];
++} virtual_job_snapshot_t;
++
++static QueueHandle_t s_jobQueue = nullptr;
++static QueueHandle_t s_resultQueue = nullptr;
++static TaskHandle_t s_workerTask = nullptr;
++static task_result s_result;
++
++static uint32_t increment_bitmask(uint32_t value, uint32_t mask)
++{
++    if (mask == 0) {
++        return value;
++    }
++
++    uint32_t carry = (value & mask) + (mask & -mask);
++    uint32_t overflow = carry & ~mask;
++    uint32_t new_value = (value & ~mask) | (carry & mask);
++
++    if (overflow > 0) {
++        new_value = increment_bitmask(new_value, overflow << 1);
++    }
++
++    return new_value;
++}
++
++static void snapshot_job(virtual_job_snapshot_t *snapshot, uint8_t job_id, const bm_job *source)
++{
++    memset(snapshot, 0, sizeof(*snapshot));
++    snapshot->job_id = job_id;
++    snapshot->generation_id = source->generation_id;
++    snapshot->starting_nonce = source->starting_nonce;
++    memcpy(&snapshot->job, source, sizeof(snapshot->job));
++    snapshot->job.jobid = snapshot->jobid;
++    snapshot->job.extranonce2 = nullptr;
++
++    if (source->jobid) {
++        strncpy(snapshot->jobid, source->jobid, sizeof(snapshot->jobid) - 1);
++    }
++
++    snapshot->version_count = source->version_mask == 0 ? 1 : VIRTUAL_VERSION_COUNT;
++    snapshot->rolled_versions[0] = source->version;
++    for (uint8_t i = 1; i < snapshot->version_count; i++) {
++        snapshot->rolled_versions[i] = increment_bitmask(snapshot->rolled_versions[i - 1], source->version_mask);
++    }
++}
++
++static bool test_snapshot_nonce(const virtual_job_snapshot_t *snapshot, uint32_t nonce, uint32_t *rolled_version)
++{
++    for (uint8_t i = 0; i < snapshot->version_count; i++) {
++        double diff = test_nonce_value(&snapshot->job, nonce, snapshot->rolled_versions[i]);
++        if (diff >= snapshot->job.pool_diff) {
++            *rolled_version = snapshot->rolled_versions[i];
++            return true;
++        }
++    }
++    return false;
++}
++
++static bool search_valid_nonce(const virtual_job_snapshot_t *snapshot, uint32_t *out_nonce, uint32_t *out_rolled_version)
++{
++    uint32_t nonce = snapshot->starting_nonce;
++    while (true) {
++        if (test_snapshot_nonce(snapshot, nonce, out_rolled_version)) {
++            *out_nonce = nonce;
++            return true;
++        }
++
++        if (nonce == UINT32_MAX) {
++            return false;
++        }
++
++        nonce++;
++        if ((nonce & SEARCH_YIELD_INTERVAL) == 0) {
++            if (uxQueueMessagesWaiting(s_jobQueue) > 0) {
++                return false;
++            }
++            vTaskDelay(1);
++        }
++    }
++}
++
++static void virtual_asic_worker(void *pvParameters)
++{
++    (void) pvParameters;
++
++    ESP_LOGI(TAG, "Virtual ASIC worker started");
++    virtual_job_snapshot_t snapshot;
++    while (true) {
++        if (xQueueReceive(s_jobQueue, &snapshot, portMAX_DELAY) != pdTRUE) {
++            continue;
++        }
++
++        ESP_LOGI(TAG, "Virtual ASIC received job %s diff %.6f", snapshot.jobid, snapshot.job.pool_diff);
++        while (true) {
++            uint32_t nonce = 0;
++            uint32_t rolled_version = snapshot.job.version;
++            if (!search_valid_nonce(&snapshot, &nonce, &rolled_version)) {
++                if (uxQueueMessagesWaiting(s_jobQueue) > 0) {
++                    break;
++                }
++                ESP_LOGW(TAG, "No valid nonce found for virtual job %s", snapshot.jobid);
++                break;
++            }
++
++            task_result found = {};
++            found.job_id = snapshot.job_id;
++            found.generation_id = snapshot.generation_id;
++            found.nonce = nonce;
++            found.rolled_version = rolled_version;
++            found.asic_nr = 0;
++            found.is_reg_resp = 0;
++
++            if (xQueueSend(s_resultQueue, &found, 0) != pdTRUE) {
++                task_result discarded = {};
++                xQueueReceive(s_resultQueue, &discarded, 0);
++                if (xQueueSend(s_resultQueue, &found, 0) != pdTRUE) {
++                    ESP_LOGW(TAG, "Virtual ASIC result queue full; nonce result not queued");
++                }
++            }
++
++            if (nonce == UINT32_MAX || uxQueueMessagesWaiting(s_jobQueue) > 0) {
++                break;
++            }
++            snapshot.starting_nonce = nonce + 1;
++        }
++    }
++}
++
++uint8_t VirtualAsic::allocateJobId()
++{
++    m_nextJobId = (uint8_t)((m_nextJobId + 4) % VIRTUAL_MAX_ASIC_JOBS);
++    return m_nextJobId;
++}
++
++uint32_t VirtualAsic::allocateGenerationId()
++{
++    m_nextGenerationId++;
++    if (m_nextGenerationId == 0) {
++        m_nextGenerationId++;
++    }
++    return m_nextGenerationId;
++}
++
++const uint8_t* VirtualAsic::getChipId()
++{
++    static const uint8_t chip_id[6] = {0x13, 0x68, 0x00, 0x00, 0x00, 0x00};
++    return chip_id;
++}
++
++uint8_t VirtualAsic::jobToAsicId(uint8_t job_id)
++{
++    return job_id;
++}
++
++uint8_t VirtualAsic::asicToJobId(uint8_t asic_id)
++{
++    return asic_id;
++}
++
++uint8_t VirtualAsic::nonceToAsicNr(uint32_t nonce)
++{
++    (void) nonce;
++    return 0;
++}
++
++const char* VirtualAsic::getName()
++{
++    return "Virtual BM1370";
++}
++
++uint8_t VirtualAsic::init(uint64_t frequency, uint16_t asic_count, uint32_t difficulty, uint32_t vrFrequency)
++{
++    (void) frequency;
++    (void) asic_count;
++    (void) vrFrequency;
++
++    setJobDifficultyMask(difficulty);
++    if (!s_jobQueue) {
++        s_jobQueue = xQueueCreate(1, sizeof(virtual_job_snapshot_t));
++    }
++    if (!s_resultQueue) {
++        s_resultQueue = xQueueCreate(8, sizeof(task_result));
++    }
++    if (!s_jobQueue || !s_resultQueue) {
++        ESP_LOGE(TAG, "Failed to create virtual ASIC queues");
++        return 0;
++    }
++    if (!s_workerTask) {
++        xTaskCreate(virtual_asic_worker, "virtual_asic", 8192, nullptr, WORKER_TASK_PRIORITY, &s_workerTask);
++    }
++    ESP_LOGI(TAG, "Virtual ASIC backend ready");
++    return 1;
++}
++
++uint8_t VirtualAsic::sendWork(uint32_t job_id, bm_job *next_bm_job)
++{
++    (void) job_id;
++
++    uint8_t virtual_job_id = allocateJobId();
++    next_bm_job->generation_id = allocateGenerationId();
++
++    virtual_job_snapshot_t snapshot;
++    snapshot_job(&snapshot, virtual_job_id, next_bm_job);
++    xQueueOverwrite(s_jobQueue, &snapshot);
++    return virtual_job_id;
++}
++
++bool VirtualAsic::processWork(task_result *result)
++{
++    if (!s_resultQueue || xQueueReceive(s_resultQueue, &s_result, 0) != pdTRUE) {
++        return false;
++    }
++
++    memcpy(result, &s_result, sizeof(*result));
++    return true;
++}
++
++void VirtualAsic::setJobDifficultyMask(int difficulty)
++{
++    m_asicDifficulty = difficulty;
++}
++
++uint16_t VirtualAsic::getSmallCoreCount()
++{
++    return 1;
++}
++
++uint32_t VirtualAsic::getDefaultVrFrequency()
++{
++    return 0;
++}
+diff --git a/main/boards/virtualaxe_gamma.cpp b/main/boards/virtualaxe_gamma.cpp
+index 7ec1e21..3aae033 100644
+--- a/main/boards/virtualaxe_gamma.cpp
++++ b/main/boards/virtualaxe_gamma.cpp
+@@ -3,6 +3,8 @@
+ #include <algorithm>
+ #include <math.h>
+
++#include "virtual_asic.h"
++
+ VirtualAxeGamma::VirtualAxeGamma() : Board()
+ {
+     m_deviceModel = "virtualAxe Gamma";
+@@ -40,6 +42,8 @@ VirtualAxeGamma::VirtualAxeGamma() : Board()
+     m_asicMinDifficultyDualPool = 1;
+     m_hasHashCounter = false;
+     m_defaultTheme = "default";
++    m_asics = new VirtualAsic();
++    m_defaultVrFrequency = m_vrFrequency = m_asics->getDefaultVrFrequency();
+ }
+
+ bool VirtualAxeGamma::initBoard()
+@@ -52,7 +56,16 @@ bool VirtualAxeGamma::initBoard()
+
+ bool VirtualAxeGamma::initAsics()
+ {
+-    return false;
++    uint8_t detected = m_asics->init(m_asicFrequency, m_asicCount, m_asicMaxDifficulty, m_vrFrequency);
++    if (detected == 0) {
++        m_chipsDetected = 0;
++        m_isInitialized = false;
++        return false;
++    }
++
++    m_chipsDetected = detected;
++    m_isInitialized = true;
++    return true;
+ }
+
+ bool VirtualAxeGamma::setAsicFrequency(float frequency)
+diff --git a/main/main.cpp b/main/main.cpp
+index ff2bd9ae..d2ed19c0 100644
+--- a/main/main.cpp
++++ b/main/main.cpp
+@@ -284,7 +284,16 @@ extern "C" void app_main(void)
+ #ifdef VIRTUALAXE_GAMMA
+     if (username) {
+         wifi_softap_off();
+-        ESP_LOGI(TAG, "virtualAxe Gamma source booted with NerdNos mining disabled pending virtual ASIC support");
++
++        POWER_MANAGEMENT_MODULE.lock();
++        if (!board->initAsics()) {
++            ESP_LOGE(TAG, "error initializing board %s", board->getDeviceModel());
++        }
++        POWER_MANAGEMENT_MODULE.unlock();
++
++        xTaskCreate(create_jobs_task, "stratum miner", 8192, NULL, 4, NULL);
++        xTaskCreate(ASIC_result_task, "asic result", 8192, NULL, 4, NULL);
++        xTaskCreate(StratumManager::taskWrapper, "stratum manager", 8192, (void *) STRATUM_MANAGER, 4, NULL);
+     }
+ #else
+     if (username) {
+diff --git a/main/stratum/stratum_api.cpp b/main/stratum/stratum_api.cpp
+index 8a67f370..23d3e0a8 100644
+--- a/main/stratum/stratum_api.cpp
++++ b/main/stratum/stratum_api.cpp
+@@ -231,7 +231,7 @@ bool StratumApi::parseMethods(JsonDocument &doc, const char *method_str, Stratum
+         break;
+     }
+     case MINING_SET_DIFFICULTY:
+-        message->new_difficulty = doc["params"][0].as<uint32_t>();
++        message->new_difficulty = doc["params"][0].as<double>();
+         break;
+     case MINING_SET_VERSION_MASK:
+         message->version_mask = strtoul(doc["params"][0].as<const char *>(), NULL, 16);
+diff --git a/main/stratum/stratum_api.h b/main/stratum/stratum_api.h
+index d7872639..9909e11d 100644
+--- a/main/stratum/stratum_api.h
++++ b/main/stratum/stratum_api.h
+@@ -46,7 +46,7 @@ typedef struct
+     uint32_t version_mask;
+     uint32_t target;
+     uint32_t ntime;
+-    uint32_t difficulty;
++    double difficulty;
+ } mining_notify;
+
+ typedef struct
+@@ -62,7 +62,7 @@ typedef struct
+     int should_abandon_work;
+     mining_notify *mining_notification;
+     // mining.set_difficulty
+-    uint32_t new_difficulty;
++    double new_difficulty;
+     // mining.set_version_mask
+     uint32_t version_mask;
+     // result
+diff --git a/main/stratum/stratum_manager.cpp b/main/stratum/stratum_manager.cpp
+index 9ea0406f..dfcb27f4 100644
+--- a/main/stratum/stratum_manager.cpp
++++ b/main/stratum/stratum_manager.cpp
+@@ -185,9 +185,9 @@ void StratumManager::dispatch(int pool, JsonDocument &doc)
+     }
+
+     case MINING_SET_DIFFICULTY: {
+-        setPoolDifficulty(pool, m_stratum_api_v1_message.new_difficulty);
++        setPoolDifficulty(pool, (uint32_t) m_stratum_api_v1_message.new_difficulty);
+         if (create_job_set_difficulty(pool, m_stratum_api_v1_message.new_difficulty)) {
+-            ESP_LOGI(tag, "Set stratum difficulty: %ld", m_stratum_api_v1_message.new_difficulty);
++            ESP_LOGI(tag, "Set stratum difficulty: %.6f", m_stratum_api_v1_message.new_difficulty);
+         }
+         break;
+     }
+@@ -446,4 +446,3 @@ double get_recent_ping_loss()
+     PingTask *task = STRATUM_MANAGER->getPingTask(idx);
+     return task ? task->get_recent_ping_loss() : 0.0;
+ }
+-
+diff --git a/main/stratum/stratum_task.cpp b/main/stratum/stratum_task.cpp
+index 385463de..2f945adb 100644
+--- a/main/stratum/stratum_task.cpp
++++ b/main/stratum/stratum_task.cpp
+@@ -52,8 +52,13 @@ StratumTaskBase::StratumTaskBase(StratumManager *manager, int index)
+
+ bool StratumTaskBase::isWifiConnected()
+ {
++#ifdef VIRTUALAXE_GAMMA
++    char ip[INET_ADDRSTRLEN] = {0};
++    return connect_get_ip_addr(ip, sizeof(ip));
++#else
+     wifi_ap_record_t ap_info;
+     return esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK;
++#endif
+ }
+
+ bool StratumTaskBase::resolveHostname(const char *hostname, char *ip_str, size_t ip_str_len)
+diff --git a/main/tasks/asic_jobs.h b/main/tasks/asic_jobs.h
+index e68d9888..f9d8aff6 100644
+--- a/main/tasks/asic_jobs.h
++++ b/main/tasks/asic_jobs.h
+@@ -66,12 +66,15 @@ public:
+         m_activeJobs[asic_job_id] = next_job;
+     }
+
+-    bm_job *getClone(uint8_t asic_job_id) {
++    bm_job *getClone(uint8_t asic_job_id, uint32_t generation_id = 0) {
+         PThreadGuard g(m_validJobsLock);
+         // check if we have a job with this job id
+         if (!m_activeJobs[asic_job_id]) {
+             return NULL;
+         }
++        if (generation_id != 0 && m_activeJobs[asic_job_id]->generation_id != generation_id) {
++            return NULL;
++        }
+         // create a clone
+         bm_job *job = cloneBmJob(m_activeJobs[asic_job_id]);
+
+@@ -79,6 +82,12 @@ public:
+         return job;
+     }
+
++    bool isCurrent(uint8_t asic_job_id, uint32_t generation_id) {
++        PThreadGuard g(m_validJobsLock);
++        return m_activeJobs[asic_job_id]
++            && (generation_id == 0 || m_activeJobs[asic_job_id]->generation_id == generation_id);
++    }
++
+ };
+
+
+diff --git a/main/tasks/asic_result_task.cpp b/main/tasks/asic_result_task.cpp
+index bf67389c..c9ab62f4 100644
+--- a/main/tasks/asic_result_task.cpp
++++ b/main/tasks/asic_result_task.cpp
+@@ -79,7 +79,7 @@ void ASIC_result_task(void *pvParameters)
+
+         uint8_t asic_job_id = asic_result.job_id;
+
+-        bm_job *job = asicJobs.getClone(asic_job_id);
++        bm_job *job = asicJobs.getClone(asic_job_id, asic_result.generation_id);
+         if (!job) {
+             //ESP_LOGI(TAG, "Invalid job id found, 0x%02X", asic_job_id);
+             continue;
+@@ -95,6 +95,14 @@ void ASIC_result_task(void *pvParameters)
+         char bestDiffString[16];
+         suffixString(STRATUM_MANAGER->getBestSessionDiff(), bestDiffString, sizeof(bestDiffString), 3);
+
++#ifdef VIRTUALAXE_GAMMA
++        if (!asicJobs.isCurrent(asic_job_id, asic_result.generation_id)) {
++            ESP_LOGW(TAG, "Stale virtual job invalidated before submit, 0x%02X", asic_job_id);
++            free_bm_job(job);
++            continue;
++        }
++#endif
++
+         const char *pool_str = job->pool_id ? "Sec" : "Pri";
+
+         // log the ASIC response, including pool and best session difficulty using human-readable SI formatting
+@@ -101,7 +101,7 @@ void ASIC_result_task(void *pvParameters)
+         // we only show responses >= maxAsicDifficulty to avoid spamming the log
+         // change for dual pool because the pool with lower % can reduce asic HW difficulty
+         if (nonce_diff >= board->getAsicMaxDifficulty() || nonce_diff >= job->pool_diff) {
+-            ESP_LOGI(TAG, "(%s) Job ID: %02X AsicNr: %d Ver: %08" PRIX32 " Nonce %08" PRIX32 "; Extranonce2 %s diff %.1f/%lu/%s",
++            ESP_LOGI(TAG, "(%s) Job ID: %02X AsicNr: %d Ver: %08" PRIX32 " Nonce %08" PRIX32 "; Extranonce2 %s diff %.1f/%.6f/%s",
+                 pool_str, asic_job_id, asic_result.asic_nr, asic_result.rolled_version, asic_result.nonce, job->extranonce2,
+                 nonce_diff, job->pool_diff, bestDiffString);
+         }
+diff --git a/main/tasks/create_jobs_task.cpp b/main/tasks/create_jobs_task.cpp
+index d163b4e5..4ef7b52d 100644
+--- a/main/tasks/create_jobs_task.cpp
++++ b/main/tasks/create_jobs_task.cpp
+@@ -45,8 +45,8 @@ class MiningInfoV1 : public MiningInfoBase {
+     char *next_extranonce_str = nullptr;
+     int next_extranonce_2_len = 0;
+
+-    uint32_t stratum_difficulty = 8192;
+-    uint32_t active_stratum_difficulty = 8192;
++    double stratum_difficulty = 8192;
++    double active_stratum_difficulty = 8192;
+     uint32_t version_mask = 0;
+
+   public:
+@@ -147,7 +147,7 @@ class MiningInfoV1 : public MiningInfoBase {
+         version_mask = mask;
+     }
+
+-    bool set_difficulty(uint32_t difficulty)
++    bool set_difficulty(double difficulty)
+     {
+         // new difficulty?
+         bool is_new = stratum_difficulty != difficulty;
+@@ -241,7 +241,7 @@ void create_job_set_version_mask(int pool, uint32_t mask)
+     ensureV1(pool)->set_version_mask(mask);
+ }
+
+-bool create_job_set_difficulty(int pool, uint32_t difficulty)
++bool create_job_set_difficulty(int pool, double difficulty)
+ {
+     PThreadGuard g(current_stratum_job_mutex);
+     return ensureV1(pool)->set_difficulty(difficulty);
+diff --git a/main/tasks/create_jobs_task.h b/main/tasks/create_jobs_task.h
+index a88b07a2..fa60c04e 100644
+--- a/main/tasks/create_jobs_task.h
++++ b/main/tasks/create_jobs_task.h
+@@ -42,6 +42,6 @@ void trigger_job_creation();
+ void create_job_mining_notify(int pool, mining_notify *notify, bool abandonWork);
+ void create_job_set_enonce(int pool, char *enonce, int enonce2_len);
+ void set_next_enonce(int pool, char *enonce, int enonce2_len);
+-bool create_job_set_difficulty(int pool, uint32_t difficulty);
++bool create_job_set_difficulty(int pool, double difficulty);
+ void create_job_set_version_mask(int pool, uint32_t mask);
+ void create_job_invalidate(int pool);
+--
+2.50.1 (Apple Git-155)

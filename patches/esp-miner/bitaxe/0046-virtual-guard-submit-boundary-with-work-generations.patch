@@ -1,0 +1,523 @@
+From df969be3632dd30d5f7a5470032adb6e8c88fa06 Mon Sep 17 00:00:00 2001
+From: virtualAxe <virtualaxe@example.invalid>
+Date: Wed, 6 May 2026 12:37:21 +0200
+Subject: [PATCH 11/13] virtual: guard submit boundary with work generations
+
+Why: prevent stale virtual work from crossing the upstream submit boundary after
+clean jobs or descriptor replacement.
+Virtual-only: generation checks and candidate filters are active for the virtual
+ASIC path while asic_result_task still revalidates with test_nonce_value.
+Upstream surface: ASIC result descriptors, virtual ASIC work generation, Stratum
+clean-job handling, and mining tests.
+Verify: run verify-test-ci, make verify-submit-replay, and remote-pool smoke.
+Removal impact: stale virtual shares can reach submit handling after the pool has
+invalidated the work.
+
+---
+ components/asic/include/asic_common.h  |   1 +
+ components/asic/include/virtual_asic.h |   3 +
+ components/asic/virtual_asic.c         | 177 +++++++++++++++++++------
+ components/stratum/include/mining.h    |   1 +
+ components/stratum/test/test_mining.c  |  89 +++++++++++++
+ main/tasks/asic_result_task.c          |  21 +++
+ main/tasks/create_jobs_task.c          |  18 ---
+ main/tasks/stratum_task.c              |   6 +-
+ 8 files changed, 255 insertions(+), 61 deletions(-)
+
+diff --git a/components/asic/include/asic_common.h b/components/asic/include/asic_common.h
+index 6e5b298..7651c6c 100644
+--- a/components/asic/include/asic_common.h
++++ b/components/asic/include/asic_common.h
+@@ -22,6 +22,7 @@ typedef struct
+ {
+     // -- job result response
+     uint8_t job_id;
++    uint32_t job_generation_id;
+     uint32_t nonce;
+     uint32_t rolled_version;
+     // ---- register response
+diff --git a/components/asic/include/virtual_asic.h b/components/asic/include/virtual_asic.h
+index eca1e9a..d48f215 100644
+--- a/components/asic/include/virtual_asic.h
++++ b/components/asic/include/virtual_asic.h
+@@ -23,5 +23,8 @@ void VIRTUAL_ASIC_read_registers(void);
+ const char * VIRTUAL_ASIC_mode_string(void);
+ uint8_t VIRTUAL_ASIC_worker_count(void);
+ bool VIRTUAL_ASIC_get_worker_status(uint8_t index, virtual_asic_worker_status_t * out_status);
++uint8_t VIRTUAL_ASIC_next_cleanable_job_id(uint8_t current_job_id);
++double VIRTUAL_ASIC_test_nonce_value(const bm_job * source, uint32_t nonce, uint32_t rolled_version);
++bool VIRTUAL_ASIC_test_filter_accepts(const bm_job * source, uint32_t nonce, uint32_t rolled_version, double pool_diff);
+ 
+ #endif /* VIRTUAL_ASIC_H_ */
+diff --git a/components/asic/virtual_asic.c b/components/asic/virtual_asic.c
+index eb84b63..6603074 100644
+--- a/components/asic/virtual_asic.c
++++ b/components/asic/virtual_asic.c
+@@ -20,6 +20,7 @@
+ typedef struct
+ {
+     uint8_t job_id;
++    uint32_t generation_id;
+     uint32_t starting_nonce;
+     uint8_t version_count;
+     uint32_t rolled_versions[VIRTUAL_MAX_ROLLED_VERSIONS];
+@@ -65,6 +66,7 @@ static TaskHandle_t worker_task_handle = NULL;
+ static task_result result;
+ static uint32_t jobs_assigned = 0;
+ static uint8_t next_job_id = 0;
++static uint32_t next_generation_id = 0;
+ static portMUX_TYPE hash_counter_lock = portMUX_INITIALIZER_UNLOCKED;
+ static uint32_t hash_attempt_counter = 0;
+ 
+@@ -164,7 +166,7 @@ static void prepare_virtual_work_cache(
+     memcpy(chunk1_words_be, material->chunk1_be, sizeof(uint32_t) * 16);
+ }
+ 
+-static bool double_sha256_header_hash(
++static void double_sha256_header_hash_exact(
+     const uint32_t first_chunk_state[8],
+     const uint32_t chunk1_words_be[16],
+     uint32_t nonce,
+@@ -198,39 +200,89 @@ static bool double_sha256_header_hash(
+         uint32_t word = BYTESWAP32(second_hash_state[i]);
+         memcpy(hash_result + (i * 4), &word, sizeof(word));
+     }
+-    return true;
+ }
+ 
+-static double virtual_job_diff_for_nonce(
++static double virtual_hash_diff(const uint8_t hash_result[32])
++{
++    double value = le256todouble(hash_result);
++    if (value == 0.0) {
++        return TRUEDIFF_ONE;
++    }
++
++    return TRUEDIFF_ONE / value;
++}
++
++static bool virtual_hash_candidate_filter_accepts(const uint8_t hash_result[32], double pool_diff)
++{
++    if (pool_diff < 1.0) {
++        // For low-difficulty pools, exact-valid hashes remain below an expanded
++        // diff-1 target. These checks only reject hashes whose most significant
++        // bits cannot be below that target.
++        if (pool_diff >= (1.0 / 65536.0)) {
++            return hash_result[31] == 0
++                && hash_result[30] == 0;
++        }
++        if (pool_diff >= (1.0 / 16777216.0)) {
++            return hash_result[31] == 0;
++        }
++        return true;
++    }
++
++    // For diff >= 1, every exact-valid little-endian hash is below the
++    // diff-1 target, whose top 32 bits are zero.
++    return hash_result[28] == 0
++        && hash_result[29] == 0
++        && hash_result[30] == 0
++        && hash_result[31] == 0;
++}
++
++static double virtual_job_exact_diff_for_nonce(
+     const uint32_t first_chunk_state[8],
+     const uint32_t chunk1_words_be[16],
+     uint32_t nonce
+ )
+ {
+     uint8_t hash_result[32];
+-    if (!double_sha256_header_hash(first_chunk_state, chunk1_words_be, nonce, hash_result)) {
+-        return 0.0;
+-    }
++    double_sha256_header_hash_exact(first_chunk_state, chunk1_words_be, nonce, hash_result);
+ 
+-    double value = le256todouble(hash_result);
+-    if (value == 0.0) {
+-        return TRUEDIFF_ONE;
++    return virtual_hash_diff(hash_result);
++}
++
++static bool virtual_job_candidate_diff_for_nonce(
++    const uint32_t first_chunk_state[8],
++    const uint32_t chunk1_words_be[16],
++    uint32_t nonce,
++    double pool_diff,
++    double * out_diff
++)
++{
++    uint8_t hash_result[32];
++    double_sha256_header_hash_exact(first_chunk_state, chunk1_words_be, nonce, hash_result);
++
++    if (!virtual_hash_candidate_filter_accepts(hash_result, pool_diff)) {
++        return false;
+     }
+ 
+-    return TRUEDIFF_ONE / value;
++    *out_diff = virtual_hash_diff(hash_result);
++    return true;
+ }
+ 
+ static bool virtual_job_test_nonce(const virtual_job_snapshot_t * snapshot, uint32_t nonce, uint32_t * rolled_version, uint32_t * attempts)
+ {
+     for (uint8_t i = 0; i < snapshot->version_count; i++) {
++        double diff = 0.0;
+         (*attempts)++;
+-        if (
+-            virtual_job_diff_for_nonce(
+-                snapshot->first_chunk_states[i],
+-                snapshot->chunk1_words_be[i],
+-                nonce
+-            ) >= snapshot->pool_diff
+-        ) {
++        if (!virtual_job_candidate_diff_for_nonce(
++            snapshot->first_chunk_states[i],
++            snapshot->chunk1_words_be[i],
++            nonce,
++            snapshot->pool_diff,
++            &diff
++        )) {
++            continue;
++        }
++
++        if (diff >= snapshot->pool_diff) {
+             *rolled_version = snapshot->rolled_versions[i];
+             return true;
+         }
+@@ -247,7 +299,34 @@ double VIRTUAL_ASIC_test_nonce_value(const bm_job * source, uint32_t nonce, uint
+ 
+     bm_job_build_sha_material(source, rolled_version, 0, &material);
+     prepare_virtual_work_cache(first_chunk_state, chunk1_words_be, &material);
+-    return virtual_job_diff_for_nonce(first_chunk_state, chunk1_words_be, nonce);
++    return virtual_job_exact_diff_for_nonce(first_chunk_state, chunk1_words_be, nonce);
++}
++
++bool VIRTUAL_ASIC_test_filter_accepts(const bm_job * source, uint32_t nonce, uint32_t rolled_version, double pool_diff)
++{
++    btc_header_material_t material;
++    uint32_t first_chunk_state[8];
++    uint32_t chunk1_words_be[16];
++    uint8_t hash_result[32];
++
++    bm_job_build_sha_material(source, rolled_version, 0, &material);
++    prepare_virtual_work_cache(first_chunk_state, chunk1_words_be, &material);
++    double_sha256_header_hash_exact(first_chunk_state, chunk1_words_be, nonce, hash_result);
++    return virtual_hash_candidate_filter_accepts(hash_result, pool_diff);
++}
++
++static uint32_t allocate_generation_id(void)
++{
++    next_generation_id++;
++    if (next_generation_id == 0) {
++        next_generation_id++;
++    }
++    return next_generation_id;
++}
++
++uint8_t VIRTUAL_ASIC_next_cleanable_job_id(uint8_t current_job_id)
++{
++    return (uint8_t)((current_job_id + 4) % 128);
+ }
+ 
+ static bool search_valid_nonce(const virtual_job_snapshot_t * snapshot, uint32_t * out_nonce, uint32_t * rolled_version)
+@@ -292,31 +371,43 @@ static void virtual_asic_worker(void * pvParameters)
+         }
+         ESP_LOGI(TAG, "Virtual ASIC worker received job %s (diff %.4f)", snapshot.jobid, snapshot.pool_diff);
+ 
+-        uint32_t nonce = 0;
+-        uint32_t rolled_version = snapshot.rolled_versions[0];
+-        if (!search_valid_nonce(&snapshot, &nonce, &rolled_version)) {
+-            if (uxQueueMessagesWaiting(job_queue) > 0) {
+-                continue;
++        while (1) {
++            uint32_t nonce = 0;
++            uint32_t rolled_version = snapshot.rolled_versions[0];
++            if (!search_valid_nonce(&snapshot, &nonce, &rolled_version)) {
++                if (uxQueueMessagesWaiting(job_queue) > 0) {
++                    break;
++                }
++                ESP_LOGW(TAG, "No valid nonce found for virtual job %s", snapshot.jobid);
++                break;
++            }
++
++            task_result found = {
++                .job_id = snapshot.job_id,
++                .job_generation_id = snapshot.generation_id,
++                .nonce = nonce,
++                .rolled_version = rolled_version,
++                .register_type = REGISTER_INVALID,
++                .asic_nr = 0,
++                .core_id = 0,
++                .small_core_id = 0,
++                .timestamp_us = esp_timer_get_time(),
++            };
++
++            if (xQueueSend(result_queue, &found, 0) != pdTRUE) {
++                task_result discarded;
++                xQueueReceive(result_queue, &discarded, 0);
++                xQueueSend(result_queue, &found, 0);
+             }
+-            ESP_LOGW(TAG, "No valid nonce found for virtual job %s", snapshot.jobid);
+-            continue;
+-        }
+ 
+-        task_result found = {
+-            .job_id = snapshot.job_id,
+-            .nonce = nonce,
+-            .rolled_version = rolled_version,
+-            .register_type = REGISTER_INVALID,
+-            .asic_nr = 0,
+-            .core_id = 0,
+-            .small_core_id = 0,
+-            .timestamp_us = esp_timer_get_time(),
+-        };
+-
+-        if (xQueueSend(result_queue, &found, 0) != pdTRUE) {
+-            task_result discarded;
+-            xQueueReceive(result_queue, &discarded, 0);
+-            xQueueSend(result_queue, &found, 0);
++            if (nonce == UINT32_MAX) {
++                ESP_LOGW(TAG, "Exhausted nonce space for virtual job %s", snapshot.jobid);
++                break;
++            }
++            snapshot.starting_nonce = nonce + 1;
++            if (uxQueueMessagesWaiting(job_queue) > 0) {
++                break;
++            }
+         }
+     }
+ }
+@@ -325,6 +416,7 @@ static void copy_job_snapshot(virtual_job_snapshot_t * snapshot, uint8_t job_id,
+ {
+     memset(snapshot, 0, sizeof(*snapshot));
+     snapshot->job_id = job_id;
++    snapshot->generation_id = source->generation_id;
+     snapshot->starting_nonce = source->starting_nonce;
+     snapshot->pool_diff = source->pool_diff;
+ 
+@@ -396,7 +488,8 @@ int VIRTUAL_ASIC_set_max_baud(void)
+ void VIRTUAL_ASIC_send_work(GlobalState * GLOBAL_STATE, void * next_job)
+ {
+     bm_job * next_bm_job = (bm_job *)next_job;
+-    next_job_id = (uint8_t)((next_job_id + 1) % 128);
++    next_job_id = VIRTUAL_ASIC_next_cleanable_job_id(next_job_id);
++    next_bm_job->generation_id = allocate_generation_id();
+ 
+     if (GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[next_job_id] != NULL) {
+         free_bm_job(GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[next_job_id]);
+diff --git a/components/stratum/include/mining.h b/components/stratum/include/mining.h
+index e493bf3..24da42a 100644
+--- a/components/stratum/include/mining.h
++++ b/components/stratum/include/mining.h
+@@ -12,6 +12,7 @@ typedef struct
+     uint32_t ntime;
+     uint32_t target; // aka difficulty, aka nbits
+     uint32_t starting_nonce;
++    uint32_t generation_id;
+ 
+     uint8_t num_midstates;
+     uint8_t midstate[32];
+diff --git a/components/stratum/test/test_mining.c b/components/stratum/test/test_mining.c
+index e785711..209b86c 100644
+--- a/components/stratum/test/test_mining.c
++++ b/components/stratum/test/test_mining.c
+@@ -6,6 +6,8 @@
+ #include <string.h>
+ 
+ extern double VIRTUAL_ASIC_test_nonce_value(const bm_job * job, uint32_t nonce, uint32_t rolled_version);
++extern uint8_t VIRTUAL_ASIC_next_cleanable_job_id(uint8_t current_job_id);
++extern bool VIRTUAL_ASIC_test_filter_accepts(const bm_job * job, uint32_t nonce, uint32_t rolled_version, double pool_diff);
+ 
+ static uint32_t test_load_be32(const uint8_t *data)
+ {
+@@ -312,6 +314,93 @@ TEST_CASE("Virtual ASIC nonce diff matches software validator across rolled vers
+     }
+ }
+ 
++TEST_CASE("Virtual ASIC job ids are invalidated by upstream clean jobs", "[mining virtual_asic]")
++{
++    bool used_slots[128] = { 0 };
++    uint8_t job_id = 124;
++
++    for (uint16_t i = 0; i < 128; i++) {
++        job_id = VIRTUAL_ASIC_next_cleanable_job_id(job_id);
++        TEST_ASSERT_EQUAL_UINT8(0, job_id % 4);
++        used_slots[job_id] = true;
++    }
++
++    bool valid_jobs[128] = { 0 };
++    for (uint16_t i = 0; i < 128; i++) {
++        valid_jobs[i] = used_slots[i];
++    }
++
++    for (uint16_t i = 0; i < 128; i += 4) {
++        valid_jobs[i] = false;
++    }
++
++    for (uint16_t i = 0; i < 128; i++) {
++        if (used_slots[i]) {
++            TEST_ASSERT_FALSE_MESSAGE(valid_jobs[i], "clean_jobs left a virtual-submittable job slot valid");
++        }
++    }
++}
++
++TEST_CASE("Virtual ASIC candidate filter has no false negatives for exact-valid nonces", "[mining virtual_asic]")
++{
++    mining_notify notify_message;
++    notify_message.prev_block_hash = "d02b10fc0d4711eae1a805af50a8a83312a2215e00017f2b0000000000000000";
++    notify_message.version = 0x20000004;
++    notify_message.target = 0x1705ae3a;
++    notify_message.ntime = 0x646ff1a9;
++
++    uint8_t merkle_root[32];
++    hex2bin("6d0359c451434605c52a5a9ce074340be47c2c63840731f9edf1db3f26b1cdd9", merkle_root, 32);
++
++    bm_job job = { 0 };
++    construct_bm_job(&notify_message, merkle_root, 0x1fffe000, 1000, &job);
++
++    static const uint32_t nonces[] = {
++        0x00000000,
++        0x00000001,
++        0x0000ffff,
++        0x00ffffff,
++        0x276E8947,
++    };
++    static const double thresholds[] = {
++        0.000000001,
++        0.001,
++        1.0,
++        18.0,
++    };
++
++    uint32_t exact_valid_cases = 0;
++    uint32_t rejected_low_diff_candidates = 0;
++    uint32_t rolled_version = job.version;
++    for (uint8_t version_index = 0; version_index < job.num_midstates; version_index++) {
++        for (size_t nonce_index = 0; nonce_index < (sizeof(nonces) / sizeof(nonces[0])); nonce_index++) {
++            uint32_t nonce = nonces[nonce_index];
++            double exact_diff = VIRTUAL_ASIC_test_nonce_value(&job, nonce, rolled_version);
++            if (exact_diff < 0.001 &&
++                !VIRTUAL_ASIC_test_filter_accepts(&job, nonce, rolled_version, 0.001)) {
++                rejected_low_diff_candidates++;
++            }
++            for (size_t threshold_index = 0; threshold_index < (sizeof(thresholds) / sizeof(thresholds[0])); threshold_index++) {
++                double pool_diff = thresholds[threshold_index];
++                if (exact_diff >= pool_diff) {
++                    exact_valid_cases++;
++                    TEST_ASSERT_TRUE_MESSAGE(
++                        VIRTUAL_ASIC_test_filter_accepts(&job, nonce, rolled_version, pool_diff),
++                        "candidate filter rejected an exact-valid nonce"
++                    );
++                }
++            }
++        }
++
++        if (version_index + 1 < job.num_midstates) {
++            rolled_version = increment_bitmask(rolled_version, job.version_mask);
++        }
++    }
++
++    TEST_ASSERT_GREATER_THAN_UINT32(0, exact_valid_cases);
++    TEST_ASSERT_GREATER_THAN_UINT32(0, rejected_low_diff_candidates);
++}
++
+ TEST_CASE("Build canonical header material for software and virtual mining", "[mining]")
+ {
+     mining_notify notify_message;
+diff --git a/main/tasks/asic_result_task.c b/main/tasks/asic_result_task.c
+index 418b386..bc1fe79 100644
+--- a/main/tasks/asic_result_task.c
++++ b/main/tasks/asic_result_task.c
+@@ -52,9 +52,30 @@ void ASIC_result_task(void *pvParameters)
+             ESP_LOGW(TAG, "Invalid job nonce found, 0x%02X", job_id);
+             continue;
+         }
++        if (asic_result->job_generation_id != 0 && asic_result->job_generation_id != active_job->generation_id)
++        {
++            ESP_LOGW(TAG, "Stale job generation found, 0x%02X result %" PRIu32 " active %" PRIu32,
++                     job_id, asic_result->job_generation_id, active_job->generation_id);
++            continue;
++        }
+         // check the nonce difficulty
+         double nonce_diff = test_nonce_value(active_job, asic_result->nonce, asic_result->rolled_version);
+ 
++#ifdef CONFIG_BITAXE_VIRTUAL
++        pthread_mutex_lock(&GLOBAL_STATE->valid_jobs_lock);
++        bool still_valid = (GLOBAL_STATE->valid_jobs[job_id] != 0);
++        bm_job *current_job = still_valid ? GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[job_id] : NULL;
++        uint32_t current_generation = current_job != NULL ? current_job->generation_id : 0;
++        pthread_mutex_unlock(&GLOBAL_STATE->valid_jobs_lock);
++
++        if (!still_valid || current_job != active_job ||
++            (asic_result->job_generation_id != 0 && asic_result->job_generation_id != current_generation))
++        {
++            ESP_LOGW(TAG, "Stale job invalidated before submit, 0x%02X", job_id);
++            continue;
++        }
++#endif
++
+         if (GLOBAL_STATE->SELF_TEST_MODULE.is_active) continue;
+ 
+         uint32_t version_bits = asic_result->rolled_version ^ active_job->version;
+diff --git a/main/tasks/create_jobs_task.c b/main/tasks/create_jobs_task.c
+index 71eb0b4..1efc7f5 100644
+--- a/main/tasks/create_jobs_task.c
++++ b/main/tasks/create_jobs_task.c
+@@ -20,7 +20,6 @@ static const char *TAG = "create_jobs_task";
+ 
+ static void generate_work(GlobalState *GLOBAL_STATE, mining_notify *notification, uint64_t extranonce_2, double difficulty);
+ static bool use_periodic_work_refresh(const GlobalState *GLOBAL_STATE);
+-static void update_virtual_active_job_difficulty(GlobalState *GLOBAL_STATE, double difficulty);
+ 
+ void create_jobs_task(void *pvParameters)
+ {
+@@ -91,7 +90,6 @@ void create_jobs_task(void *pvParameters)
+                 if (GLOBAL_STATE->new_set_mining_difficulty_msg) {
+                     ESP_LOGI(TAG, "New pool difficulty %.2f", GLOBAL_STATE->pool_difficulty);
+                     difficulty = GLOBAL_STATE->pool_difficulty;
+-                    update_virtual_active_job_difficulty(GLOBAL_STATE, difficulty);
+                     GLOBAL_STATE->new_set_mining_difficulty_msg = false;
+                     should_generate_work = true;
+                 }
+@@ -120,22 +118,6 @@ static bool use_periodic_work_refresh(const GlobalState *GLOBAL_STATE)
+     return GLOBAL_STATE->DEVICE_CONFIG.family.asic.id != ASIC_VIRTUAL;
+ }
+ 
+-static void update_virtual_active_job_difficulty(GlobalState *GLOBAL_STATE, double difficulty)
+-{
+-    pthread_mutex_lock(&GLOBAL_STATE->valid_jobs_lock);
+-    for (int i = 0; i < 128; i++) {
+-        if (!GLOBAL_STATE->valid_jobs[i]) {
+-            continue;
+-        }
+-
+-        bm_job *active_job = GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[i];
+-        if (active_job != NULL) {
+-            active_job->pool_diff = difficulty;
+-        }
+-    }
+-    pthread_mutex_unlock(&GLOBAL_STATE->valid_jobs_lock);
+-}
+-
+ static void generate_work(GlobalState *GLOBAL_STATE, mining_notify *notification, uint64_t extranonce_2, double difficulty)
+ {
+     if (GLOBAL_STATE->extranonce_2_len > MAX_EXTRANONCE2_LEN) {
+diff --git a/main/tasks/stratum_task.c b/main/tasks/stratum_task.c
+index c2ace66..576d1cd 100644
+--- a/main/tasks/stratum_task.c
++++ b/main/tasks/stratum_task.c
+@@ -605,7 +605,11 @@ void stratum_task(void * pvParameters)
+                 GLOBAL_STATE->SYSTEM_MODULE.work_received++;
+                 SYSTEM_notify_new_ntime(GLOBAL_STATE, stratum_api_v1_message.mining_notification->ntime);
+                 if (stratum_api_v1_message.mining_notification->clean_jobs &&
+-                    (GLOBAL_STATE->stratum_queue.count > 0)) {
++                    (GLOBAL_STATE->stratum_queue.count > 0
++#ifdef CONFIG_BITAXE_VIRTUAL
++                     || GLOBAL_STATE->DEVICE_CONFIG.family.asic.id == ASIC_VIRTUAL
++#endif
++                    )) {
+                     cleanQueue(GLOBAL_STATE);
+                 }
+                 if (GLOBAL_STATE->stratum_queue.count == QUEUE_SIZE) {
+-- 
+2.50.1 (Apple Git-155)

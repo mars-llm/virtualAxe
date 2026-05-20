@@ -1,0 +1,139 @@
+From 63ac2cab60b7656f6d1a5a67653dbee2c2386b5a Mon Sep 17 00:00:00 2001
+From: virtualAxe <virtualaxe@example.invalid>
+Date: Wed, 6 May 2026 12:37:21 +0200
+Subject: [PATCH 10/13] virtual: align digest path with validator
+
+Why: align the guest digest path with test_nonce_value while preserving
+rolled_version conversion at submit time.
+Virtual-only: the exported test helper exercises the virtual ASIC digest code
+without changing physical ASIC behavior.
+Upstream surface: virtual ASIC digest calculation and mining unit tests.
+Verify: run verify-test-ci and make verify-submit-replay.
+Removal impact: valid guest nonces can be rejected or invalid candidates can be
+submitted.
+
+---
+ components/asic/virtual_asic.c        | 15 ++++--
+ components/stratum/test/test_mining.c | 67 +++++++++++++++++++++++++++
+ 2 files changed, 78 insertions(+), 4 deletions(-)
+
+diff --git a/components/asic/virtual_asic.c b/components/asic/virtual_asic.c
+index 90a084b..eb84b63 100644
+--- a/components/asic/virtual_asic.c
++++ b/components/asic/virtual_asic.c
+@@ -194,10 +194,6 @@ static bool double_sha256_header_hash(
+     memcpy(second_hash_state, SHA256_H0, sizeof(second_hash_state));
+     sha256_compress(second_hash_state, second_hash_block);
+ 
+-    if ((second_hash_state[7] & 0xFFFF) != 0) {
+-        return false;
+-    }
+-
+     for (int i = 0; i < 8; i++) {
+         uint32_t word = BYTESWAP32(second_hash_state[i]);
+         memcpy(hash_result + (i * 4), &word, sizeof(word));
+@@ -243,6 +239,17 @@ static bool virtual_job_test_nonce(const virtual_job_snapshot_t * snapshot, uint
+     return false;
+ }
+ 
++double VIRTUAL_ASIC_test_nonce_value(const bm_job * source, uint32_t nonce, uint32_t rolled_version)
++{
++    btc_header_material_t material;
++    uint32_t first_chunk_state[8];
++    uint32_t chunk1_words_be[16];
++
++    bm_job_build_sha_material(source, rolled_version, 0, &material);
++    prepare_virtual_work_cache(first_chunk_state, chunk1_words_be, &material);
++    return virtual_job_diff_for_nonce(first_chunk_state, chunk1_words_be, nonce);
++}
++
+ static bool search_valid_nonce(const virtual_job_snapshot_t * snapshot, uint32_t * out_nonce, uint32_t * rolled_version)
+ {
+     uint32_t nonce = snapshot->starting_nonce;
+diff --git a/components/stratum/test/test_mining.c b/components/stratum/test/test_mining.c
+index d9ca91c..e785711 100644
+--- a/components/stratum/test/test_mining.c
++++ b/components/stratum/test/test_mining.c
+@@ -5,6 +5,8 @@
+ #include <limits.h>
+ #include <string.h>
+ 
++extern double VIRTUAL_ASIC_test_nonce_value(const bm_job * job, uint32_t nonce, uint32_t rolled_version);
++
+ static uint32_t test_load_be32(const uint8_t *data)
+ {
+     return ((uint32_t)data[0] << 24)
+@@ -245,6 +247,71 @@ TEST_CASE("Test nonce diff checking 2", "[mining test_nonce][not-on-qemu]")
+     TEST_ASSERT_EQUAL_INT(683, (int)diff);
+ }
+ 
++TEST_CASE("Virtual ASIC nonce diff matches software validator", "[mining virtual_asic]")
++{
++    mining_notify notify_message;
++    notify_message.prev_block_hash = "d02b10fc0d4711eae1a805af50a8a83312a2215e00017f2b0000000000000000";
++    notify_message.version = 0x20000004;
++    notify_message.target = 0x1705ae3a;
++    notify_message.ntime = 0x646ff1a9;
++
++    uint8_t merkle_root[32];
++    hex2bin("6d0359c451434605c52a5a9ce074340be47c2c63840731f9edf1db3f26b1cdd9", merkle_root, 32);
++
++    bm_job job = { 0 };
++    construct_bm_job(&notify_message, merkle_root, 0, 1000, &job);
++
++    uint32_t nonce = 0x276E8947;
++    uint32_t rolled_version = job.version;
++    double software_diff = test_nonce_value(&job, nonce, rolled_version);
++    double virtual_diff = VIRTUAL_ASIC_test_nonce_value(&job, nonce, rolled_version);
++
++    TEST_ASSERT_FLOAT_WITHIN(0.0001f, software_diff, virtual_diff);
++}
++
++TEST_CASE("Virtual ASIC nonce diff matches software validator across rolled versions", "[mining virtual_asic]")
++{
++    mining_notify notify_message;
++    notify_message.prev_block_hash = "d02b10fc0d4711eae1a805af50a8a83312a2215e00017f2b0000000000000000";
++    notify_message.version = 0x20000004;
++    notify_message.target = 0x1705ae3a;
++    notify_message.ntime = 0x646ff1a9;
++
++    uint8_t merkle_root[32];
++    hex2bin("6d0359c451434605c52a5a9ce074340be47c2c63840731f9edf1db3f26b1cdd9", merkle_root, 32);
++
++    bm_job job = { 0 };
++    construct_bm_job(&notify_message, merkle_root, 0x1fffe000, 1000, &job);
++    TEST_ASSERT_EQUAL_UINT8(4, job.num_midstates);
++
++    static const uint32_t nonces[] = {
++        0x00000000,
++        0x00000001,
++        0x0000ffff,
++        0x00ffffff,
++        0x276E8947,
++    };
++
++    uint32_t rolled_version = job.version;
++    for (uint8_t version_index = 0; version_index < job.num_midstates; version_index++) {
++        for (size_t nonce_index = 0; nonce_index < (sizeof(nonces) / sizeof(nonces[0])); nonce_index++) {
++            uint32_t nonce = nonces[nonce_index];
++            double software_diff = test_nonce_value(&job, nonce, rolled_version);
++            double virtual_diff = VIRTUAL_ASIC_test_nonce_value(&job, nonce, rolled_version);
++            TEST_ASSERT_FLOAT_WITHIN_MESSAGE(
++                0.0001f,
++                software_diff,
++                virtual_diff,
++                "rolled-version virtual diff deviated from software validator"
++            );
++        }
++
++        if (version_index + 1 < job.num_midstates) {
++            rolled_version = increment_bitmask(rolled_version, job.version_mask);
++        }
++    }
++}
++
+ TEST_CASE("Build canonical header material for software and virtual mining", "[mining]")
+ {
+     mining_notify notify_message;
+-- 
+2.50.1 (Apple Git-155)

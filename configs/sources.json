@@ -1,0 +1,36 @@
+{
+  "defaultSource": "bitaxe",
+  "aliases": {
+    "vanilla": "bitaxe"
+  },
+  "sources": {
+    "bitaxe": {
+      "displayName": "Bitaxe ESP-Miner",
+      "repoUrl": "https://github.com/bitaxeorg/ESP-Miner",
+      "ref": "ce44b2bbfef60ef8830ab17b321cc295e0c0edc8",
+      "resolvedCommit": "ce44b2bbfef60ef8830ab17b321cc295e0c0edc8",
+      "patchSeries": "patches/esp-miner/bitaxe/series.txt",
+      "nvsTemplate": "configs/nvs/config-virtual.csv",
+      "profile": "gamma",
+      "supportState": "live_verified",
+      "supportStatus": "default firmware source; deterministic gates and live pool accepted-share evidence verified"
+    },
+    "nerdnos": {
+      "displayName": "NerdNOS / NerdQAxePlus ESP-Miner",
+      "repoUrl": "https://github.com/shufps/ESP-Miner-NerdQAxePlus",
+      "ref": "c18abafebde66c39f4bd8ae6d839088b84b4e79c",
+      "resolvedCommit": "c18abafebde66c39f4bd8ae6d839088b84b4e79c",
+      "releaseTag": "v1.0.37",
+      "patchSeries": "patches/esp-miner/nerdnos/series.txt",
+      "nvsTemplate": "configs/nvs/config-virtual.csv",
+      "profile": "gamma",
+      "buildVars": {
+        "BOARD": "VIRTUALAXE_GAMMA"
+      },
+      "initSubmodules": true,
+      "qemuMemoryMb": 8,
+      "supportState": "live_verified",
+      "supportStatus": "additional firmware source; deterministic gates and live pool accepted-share evidence verified"
+    }
+  }
+}
