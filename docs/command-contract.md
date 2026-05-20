@@ -29,6 +29,7 @@ right gate without guessing.
 | `make validate-config` | tracked-source read-only | Validates tracked source, profile, and NVS configuration. Generated manifests are validated only when passed explicitly to the validator. |
 | `make secret-scan` | tracked-source read-only | Scans tracked files for private material and reports location plus classification only. |
 | `make local-state-report` | tracked-source read-only | Reports ignored/generated state, size, git classification, and cleanup guidance without deleting anything. |
+| `make clean-clone-smoke` | external/live, ignored-state mutating | Requires a clean tracked worktree, clones the current repository into a temporary directory, then runs the first-user path: `./vaxe`, `make help`, `make drift-check`, `make validate-lite`, `make build SOURCE=bitaxe`, and `make build SOURCE=nerdnos`. The temporary clone is removed on success and preserved on failure for inspection. |
 | `make drift-check` | ignored-state mutating | Checks configured-pin patch apply in a disposable temp directory, reports patch-series hash, generated manifest status, and local state presence. |
 | `make patch-audit` | tracked-source read-only | Reports patch subjects, touched files, hunk counts, changed-line counts, touched surfaces, keep reasons, and follow-up recommendations. |
 | `make patch-check` | ignored-state mutating | Applies the default Bitaxe patch stack to a disposable target directory. It may replace `PATCH_TARGET_DIR` after patch-target safety checks. |

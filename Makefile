@@ -16,6 +16,7 @@ help:
 	@printf "  make validate-config [tracked-source read-only] Validate tracked release configuration\n"
 	@printf "  make secret-scan    [tracked-source read-only] Scan tracked files for private material\n"
 	@printf "  make local-state-report [tracked-source read-only] Report ignored/generated local state\n"
+	@printf "  make clean-clone-smoke [external/live, ignored-state mutating] Clone the repo into temp state and run the first-user path\n"
 	@printf "  make drift-check    [ignored-state mutating] Report release drift against the configured pin\n"
 	@printf "  make patch-audit    [tracked-source read-only] Report ESP-Miner patch hunk metadata\n"
 	@printf "  make audit          [report-generating] Write a compact report under ignored out/audit/\n"
@@ -35,7 +36,7 @@ help:
 	@printf "  make verify-persistence  [runtime mutating] Verify saved settings survive restart and rebuild\n"
 	@printf "  make doctor         [tracked-source read-only] Probe supported upstream checkouts and local tooling\n"
 
-.PHONY: help validate validate-lite validate-config secret-scan local-state-report drift-check patch-audit audit release-evidence sync-upstream build run dashboard e2e verify-submit-replay verify-release patch-check patch-check-upstream test-ci test-api test-browser verify-persistence doctor
+.PHONY: help validate validate-lite validate-config secret-scan local-state-report clean-clone-smoke drift-check patch-audit audit release-evidence sync-upstream build run dashboard e2e verify-submit-replay verify-release patch-check patch-check-upstream test-ci test-api test-browser verify-persistence doctor
 
 validate:
 	./scripts/ensure-test-python.sh
@@ -53,6 +54,9 @@ secret-scan:
 
 local-state-report:
 	python3 ./scripts/local-state-report.py
+
+clean-clone-smoke:
+	./scripts/clean-clone-smoke.sh
 
 drift-check:
 	python3 ./scripts/drift-check.py

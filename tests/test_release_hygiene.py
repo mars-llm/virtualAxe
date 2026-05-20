@@ -489,6 +489,7 @@ def test_release_readiness_commands_are_public_and_documented():
         "validate-config",
         "secret-scan",
         "local-state-report",
+        "clean-clone-smoke",
         "drift-check",
         "patch-audit",
         "audit",
@@ -498,11 +499,31 @@ def test_release_readiness_commands_are_public_and_documented():
         assert f"{target}:" in makefile
         assert f"make {target}" in command_contract
     assert "make validate" in readme
+    assert "make clean-clone-smoke" in command_contract
     assert "make drift-check" in command_contract
     assert "bootstrap:" not in makefile
     assert "make bootstrap" not in command_contract
     assert "| `./vaxe` | tracked-source read-only | Prints usage and concrete start examples." in command_contract
     assert not (ROOT_DIR / "scripts" / "bootstrap.sh").exists()
+
+
+def test_clean_clone_smoke_runs_actual_first_user_path():
+    makefile = (ROOT_DIR / "Makefile").read_text(encoding="utf-8")
+    script = (ROOT_DIR / "scripts" / "clean-clone-smoke.sh").read_text(encoding="utf-8")
+    command_contract = (ROOT_DIR / "docs" / "command-contract.md").read_text(encoding="utf-8")
+
+    assert "clean-clone-smoke:" in makefile
+    assert "./scripts/clean-clone-smoke.sh" in makefile
+    assert "git clone --quiet" in script
+    assert "git -C \"${ROOT_DIR}\" diff --quiet" in script
+    assert "run_step ./vaxe" in script
+    assert "run_step make help" in script
+    assert "run_step make drift-check" in script
+    assert "run_step make validate-lite" in script
+    assert "run_step make build SOURCE=bitaxe" in script
+    assert "run_step make build SOURCE=nerdnos" in script
+    assert "preserved clone" in script
+    assert "removed on success and preserved on failure" in command_contract
 
 
 def test_readme_is_human_focused_github_landing_page():
