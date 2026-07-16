@@ -68,6 +68,16 @@ def test_vaxe_without_arguments_prints_help_without_starting(monkeypatch: pytest
     assert "Bare ./vaxe prints this help and does not start QEMU." in output
 
 
+def test_vaxe_help_describes_profile_and_simulation_options():
+    module = load_module()
+
+    output = " ".join(module.build_parser().format_help().split())
+
+    assert "Virtual hardware profile (gamma is the only supported profile)" in output
+    assert "Enable the loopback-only /sim/* UI controls" in output
+    assert "Firmware HTTP port behind the Simulation Actions proxy" in output
+
+
 def test_vaxe_parser_accepts_sim_actions_flag():
     module = load_module()
 
@@ -77,6 +87,14 @@ def test_vaxe_parser_accepts_sim_actions_flag():
     assert args.sim_actions is True
     assert args.sim_backend_port == 19082
     assert module.runtime_ports(args) == ("19082", "18080")
+
+
+@pytest.mark.parametrize("port", ["0", "65536", "not-a-port"])
+def test_vaxe_parser_rejects_invalid_sim_backend_port(port: str):
+    module = load_module()
+
+    with pytest.raises(SystemExit):
+        module.parse_args(["--source", "bitaxe", "--sim-actions", "--sim-backend-port", port])
 
 
 def test_vaxe_parser_accepts_sim_actions_env(monkeypatch: pytest.MonkeyPatch):

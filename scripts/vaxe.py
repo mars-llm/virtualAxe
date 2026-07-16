@@ -79,15 +79,23 @@ def env_flag_enabled(name: str) -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
-def default_sim_backend_http_port() -> int:
-    raw = os.environ.get("VIRTUAL_BITAXE_SIM_BACKEND_PORT", DEFAULT_SIM_BACKEND_HTTP_PORT).strip()
+def parse_port(raw: str, *, label: str) -> int:
     try:
         port = int(raw)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError("VIRTUAL_BITAXE_SIM_BACKEND_PORT must be an integer") from exc
+        raise argparse.ArgumentTypeError(f"{label} must be an integer") from exc
     if port < 1 or port > 65535:
-        raise argparse.ArgumentTypeError("VIRTUAL_BITAXE_SIM_BACKEND_PORT must be between 1 and 65535")
+        raise argparse.ArgumentTypeError(f"{label} must be between 1 and 65535")
     return port
+
+
+def parse_sim_backend_http_port(raw: str) -> int:
+    return parse_port(raw, label="--sim-backend-port")
+
+
+def default_sim_backend_http_port() -> int:
+    raw = os.environ.get("VIRTUAL_BITAXE_SIM_BACKEND_PORT", DEFAULT_SIM_BACKEND_HTTP_PORT).strip()
+    return parse_port(raw, label="VIRTUAL_BITAXE_SIM_BACKEND_PORT")
 
 
 def runtime_ports(args: argparse.Namespace) -> tuple[str, str]:
@@ -112,10 +120,25 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--source", choices=public_sources, required=True, help="Firmware source to run")
-    parser.add_argument("--profile", choices=available_profiles, default="gamma")
+    parser.add_argument(
+        "--profile",
+        choices=available_profiles,
+        default="gamma",
+        help="Virtual hardware profile (gamma is the only supported profile)",
+    )
     parser.add_argument("--pool", type=parse_pool_target, help="Use public, bitronics, nerdminers, or host:port")
-    parser.add_argument("--sim-actions", action="store_true", default=env_flag_enabled("VIRTUAL_BITAXE_SIM_ACTIONS"))
-    parser.add_argument("--sim-backend-port", type=int, default=default_sim_backend_http_port())
+    parser.add_argument(
+        "--sim-actions",
+        action="store_true",
+        default=env_flag_enabled("VIRTUAL_BITAXE_SIM_ACTIONS"),
+        help="Enable the loopback-only /sim/* UI controls",
+    )
+    parser.add_argument(
+        "--sim-backend-port",
+        type=parse_sim_backend_http_port,
+        default=default_sim_backend_http_port(),
+        help="Firmware HTTP port behind the Simulation Actions proxy",
+    )
     return parser
 
 
