@@ -195,6 +195,17 @@ def test_vaxe_status_reports_stale_image_provenance(monkeypatch: pytest.MonkeyPa
     assert "manifest configuredResolvedCommit does not match tracked configuration" in result["staleReasons"]
 
 
+def test_vaxe_status_ignores_non_json_optional_firmware_fallback(monkeypatch: pytest.MonkeyPatch):
+    module = load_module()
+
+    def invalid_firmware_fallback(*_args, **_kwargs):
+        raise UnicodeDecodeError("utf-8", b"\x1f\x8b", 1, 2, "invalid start byte")
+
+    monkeypatch.setattr(module, "fetch_json", invalid_firmware_fallback)
+
+    assert module.fetch_optional_json("http://127.0.0.1:18080/sim/capabilities") is None
+
+
 def test_vaxe_status_reports_simulation_proxy_and_firmware_metrics(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     module = load_module()
     requested_urls: list[str] = []

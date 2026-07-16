@@ -184,7 +184,7 @@ def fetch_json(url: str, *, timeout: float = 10.0) -> dict[str, Any]:
 def fetch_optional_json(url: str, *, timeout: float = 1.0) -> dict[str, Any] | None:
     try:
         return fetch_json(url, timeout=timeout)
-    except (RuntimeError, TimeoutError, OSError, urllib.error.URLError, json.JSONDecodeError):
+    except (RuntimeError, TimeoutError, OSError, urllib.error.URLError, UnicodeDecodeError, json.JSONDecodeError):
         return None
 
 
@@ -432,7 +432,7 @@ def runtime_is_active(container_name: str, out_dir: Path) -> bool:
 def runtime_api_reachable(env: dict[str, str], *, timeout: float = 1.0) -> bool:
     try:
         fetch_json(f"{env['BASE_URL']}/api/system/info", timeout=timeout)
-    except (RuntimeError, TimeoutError, OSError, urllib.error.URLError, json.JSONDecodeError):
+    except (RuntimeError, TimeoutError, OSError, urllib.error.URLError, UnicodeDecodeError, json.JSONDecodeError):
         return False
     return True
 
