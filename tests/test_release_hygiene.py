@@ -87,7 +87,6 @@ FORBIDDEN_ACTIVE_DOC_PATTERNS = [
     r"0050-virtual-reconnect-stalled-submit-responses",
     r'"repo"\s*:\s*"https://github\.com/bitaxeorg/ESP-Miner"',
     r'"name"\s*:\s*"gamma"',
-    r"AG" r"ENTS\.md",
     r"RELEASE_" r"CHECKLIST\.md",
     r"docs/" r"ag" r"ent-guide\.md",
     r"docs/" r"ag" r"ent-native-readiness-" r"tick" r"ets\.md",
@@ -105,9 +104,8 @@ REMOVED_PUBLIC_SURFACES = {
 }
 
 
-def removed_process_docs() -> set[str]:
+def removed_private_process_docs() -> set[str]:
     return {
-        "AG" + "ENTS.md",
         "RELEASE_" + "CHECKLIST.md",
         "docs/" + "ag" + "ent-guide.md",
         "docs/" + "ag" + "ent-native-readiness-" + "tick" + "ets.md",
@@ -333,7 +331,8 @@ def test_public_repo_does_not_track_local_process_docs_or_upstream_source():
     files = tracked_files()
 
     assert files.isdisjoint(REMOVED_PUBLIC_SURFACES)
-    assert files.isdisjoint(removed_process_docs())
+    assert files.isdisjoint(removed_private_process_docs())
+    assert "AGENTS.md" in files
     assert not any(path.startswith("upstream/") for path in files)
     assert not (ROOT_DIR / "reference").exists()
 
@@ -349,8 +348,15 @@ def test_public_source_docs_match_current_schema():
     nerdnos = sources["sources"]["nerdnos"]
 
     assert default_source == "bitaxe"
-    assert f"| `bitaxe` | `bitaxeorg/ESP-Miner` | `{bitaxe['ref']}` | `{profile['id']}` |" in readme
-    assert f"| `nerdnos` | `shufps/ESP-Miner-NerdQAxePlus` | `v1.0.37` / `{nerdnos['resolvedCommit']}` | `{profile['id']}` |" in readme
+    assert (
+        "| `bitaxe` | [bitaxeorg/ESP-Miner](https://github.com/bitaxeorg/ESP-Miner) | "
+        f"`{bitaxe['ref']}` | `{profile['id']}` |"
+    ) in readme
+    assert (
+        "| `nerdnos` | "
+        "[shufps/ESP-Miner-NerdQAxePlus](https://github.com/shufps/ESP-Miner-NerdQAxePlus) | "
+        f"`v1.0.37` / `{nerdnos['resolvedCommit']}` | `{profile['id']}` |"
+    ) in readme
     assert "SOURCE_NAME=vanilla" not in readme
     assert "SOURCE_NAME=vanilla" not in upstream_doc
     assert '"repo":' not in readme
@@ -441,9 +447,33 @@ def test_public_repo_excludes_local_process_documents():
         for path in [ROOT_DIR / "README.md", *sorted((ROOT_DIR / "docs").glob("*.md"))]
     )
 
-    for path in removed_process_docs():
+    for path in removed_private_process_docs():
         assert path not in files
         assert path not in docs_text
+
+
+def test_repository_agent_policy_is_tracked_and_enforces_runtime_boundaries():
+    files = tracked_files()
+    policy = (ROOT_DIR / "AGENTS.md").read_text(encoding="utf-8")
+
+    assert "AGENTS.md" in files
+    for required in (
+        "make validate SOURCE=bitaxe",
+        "make validate SOURCE=nerdnos",
+        "make local-state-report",
+        "make drift-check",
+        "make verify-release",
+        ".state/todo_local.md",
+        "ASIC_send_work()",
+        "ASIC_process_work()",
+        "test_nonce_value()",
+        "0044`/`0045",
+    ):
+        assert required in policy
+    assert "Do not add host-side or relay-assisted proof-of-work." in policy
+    assert "Simulation Actions must not affect hashrate" in policy
+    assert "Do not run `make verify-release`" in policy
+    assert "Do not commit generated state" in policy
 
 
 def test_python_dependencies_are_locked():
@@ -579,7 +609,6 @@ def test_readme_is_human_focused_github_landing_page():
     assert "git clone https://github.com/mars-llm/virtualAxe.git" in quick_start
     assert "cd virtualAxe" in quick_start
     assert "./vaxe --source bitaxe" in quick_start
-    assert "run ./vaxe --source bitaxe" in quick_start
     assert "make build SOURCE=bitaxe" in quick_start
     assert "Successful builds print the image path, manifest path" in quick_start
     assert "real Bitaxe AxeOS UI" in quick_start
@@ -587,9 +616,8 @@ def test_readme_is_human_focused_github_landing_page():
     assert "make bootstrap" not in quick_start
     assert "./scripts/install-vaxe.sh" not in quick_start
     assert re.search(r"first run fetches the\s+pinned upstream source", quick_start, re.IGNORECASE)
-    assert "For a coding agent" in quick_start
-    assert "Do not vendor upstream source into this repository" in quick_start
-    assert "Ask before running live pool verification" in quick_start
+    assert "For a coding agent" not in quick_start
+    assert "AGENTS.md" in readme
     assert "make build SOURCE=bitaxe" in readme
     assert "make build SOURCE=nerdnos" in readme
     assert "out/qemu_flash.bin" in readme
@@ -791,9 +819,10 @@ def test_readme_documents_platform_support_matrix():
     readme = (ROOT_DIR / "README.md").read_text(encoding="utf-8")
     quick_start = readme.split("## Quick Start", 1)[1].split("## What It Does", 1)[0]
 
-    assert "Linux, macOS, or WSL2 on Windows" in quick_start
+    assert "Linux or macOS" in quick_start
+    assert "WSL2 may work, but is best-effort and not release-qualified" in quick_start
     assert "On macOS, Docker Desktop must be running" in quick_start
-    assert "WSL2 with Docker or Podman integration" in quick_start
+    assert "WSL2 with Docker or Podman integration is best-effort only" in quick_start
     assert "Native\nWindows shells are not part of the tested release matrix" in readme
     assert "native windows support is claimed" not in readme.lower()
 
@@ -821,8 +850,8 @@ def test_public_docs_exclude_local_process_ledgers():
         "not proven hunk-minimized",
     ]
 
-    assert files.isdisjoint(removed_process_docs())
-    for removed_path in removed_process_docs():
+    assert files.isdisjoint(removed_private_process_docs())
+    for removed_path in removed_private_process_docs():
         for text in public_docs.values():
             assert removed_path not in text
     for token in forbidden_tokens:

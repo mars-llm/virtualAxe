@@ -13,6 +13,8 @@
   ·
   <a href="docs/architecture.md">Architecture</a>
   ·
+  <a href="AGENTS.md">Agent Guide</a>
+  ·
   <a href="LICENSE">MIT License</a>
 </p>
 
@@ -21,7 +23,8 @@
 Virtual Bitaxe firmware testing for ESP-Miner, AxeOS, and ESP32-S3 QEMU.
 
 `virtualAxe` builds reusable QEMU firmware images from pinned upstream sources,
-boots the real AxeOS web UI locally, and keeps mining behavior inside the guest
+including [bitaxeorg/ESP-Miner](https://github.com/bitaxeorg/ESP-Miner), boots
+the real AxeOS web UI locally, and keeps mining behavior inside the guest
 firmware through a virtual ASIC path.
 
 Use it to test AxeOS, ESP-Miner settings, NVS persistence, Stratum pool flows,
@@ -34,7 +37,7 @@ on a physical Bitaxe.
 
 Prerequisites:
 
-- Linux, macOS, or WSL2 on Windows.
+- Linux or macOS. WSL2 may work, but is best-effort and not release-qualified.
 - Python 3.12 or newer.
 - Git.
 - Docker or Podman, unless you already have a native ESP-IDF and QEMU toolchain.
@@ -91,14 +94,8 @@ make verify-submit-replay SOURCE=nerdnos
 
 On macOS, Docker Desktop must be running. If you use Podman, an existing Podman
 machine must be available; virtualAxe can start it, but will not create or
-recreate it. On Windows, use WSL2 with Docker or Podman integration. Native
+recreate it. WSL2 with Docker or Podman integration is best-effort only. Native
 Windows shells are not part of the tested release matrix.
-
-For a coding agent, use a bounded setup prompt:
-
-```text
-Clone virtualAxe, check for Python 3.12+, Git, and Docker or Podman, run ./vaxe --source bitaxe, and verify AxeOS at http://127.0.0.1:18080. Let virtualAxe fetch pinned upstream firmware sources. Do not vendor upstream source into this repository. Ask before running live pool verification.
-```
 
 ## What It Does
 
@@ -133,8 +130,8 @@ Patch, drift, release, and cleanup commands are documented in
 
 | Alias | Upstream | Ref | Profile | Status |
 | --- | --- | --- | --- | --- |
-| `bitaxe` | `bitaxeorg/ESP-Miner` | `ce44b2bbfef60ef8830ab17b321cc295e0c0edc8` | `gamma` | `live_verified`: default source. Build, API boot, deterministic submit replay, and live accepted-share evidence pass. |
-| `nerdnos` | `shufps/ESP-Miner-NerdQAxePlus` | `v1.0.37` / `c18abafebde66c39f4bd8ae6d839088b84b4e79c` | `gamma` | `live_verified`: additional source. Build, API boot, deterministic submit replay, and live accepted-share evidence pass. |
+| `bitaxe` | [bitaxeorg/ESP-Miner](https://github.com/bitaxeorg/ESP-Miner) | `ce44b2bbfef60ef8830ab17b321cc295e0c0edc8` | `gamma` | `live_verified`: default source. Build, API boot, deterministic submit replay, and live accepted-share evidence pass. |
+| `nerdnos` | [shufps/ESP-Miner-NerdQAxePlus](https://github.com/shufps/ESP-Miner-NerdQAxePlus) | `v1.0.37` / `c18abafebde66c39f4bd8ae6d839088b84b4e79c` | `gamma` | `live_verified`: additional source. Build, API boot, deterministic submit replay, and live accepted-share evidence pass. |
 
 `bitaxe` and `nerdnos` select firmware source only. `gamma` remains the only
 virtual hardware profile. NerdNos support is source-specific and scoped to the
@@ -200,6 +197,8 @@ are [MIT licensed](LICENSE).
 
 ## Docs
 
+- [`AGENTS.md`](AGENTS.md) - repository boundaries and operating rules for
+  coding agents
 - [`docs/command-contract.md`](docs/command-contract.md) - command side effects
   and release gates
 - [`docs/architecture.md`](docs/architecture.md) - runtime architecture and
