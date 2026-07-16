@@ -1562,10 +1562,62 @@ def command_state_import(args: argparse.Namespace) -> int:
     return 0
 
 
+def path_is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def resolve_state_reset_dir(args: argparse.Namespace, profile_id: str) -> Path:
+    state_root = STATE_ROOT.resolve(strict=False)
+    requested = Path(args.state_dir).expanduser() if args.state_dir else STATE_ROOT / args.source / profile_id
+    target = requested.resolve(strict=False)
+
+    if target != state_root and path_is_within(target, state_root):
+        return target
+
+    if args.state_dir is None:
+        raise SystemExit(
+            f"Refusing unsafe state reset target {target}: the selected source escapes {state_root}."
+        )
+
+    protected_roots = {
+        Path("/").resolve(strict=False),
+        ROOT_DIR.resolve(strict=False),
+        Path.home().resolve(strict=False),
+        Path(tempfile.gettempdir()).resolve(strict=False),
+    }
+    if target == state_root:
+        protected_roots.add(state_root)
+
+    for protected in protected_roots:
+        if target == protected or path_is_within(protected, target):
+            raise SystemExit(
+                f"Refusing unsafe state reset target {target}: it is or contains protected path {protected}."
+            )
+
+    repo_root = ROOT_DIR.resolve(strict=False)
+    if path_is_within(target, repo_root):
+        raise SystemExit(
+            f"Refusing unsafe state reset target {target}: repository paths outside {state_root} are protected."
+        )
+
+    if os.environ.get("VIRTUALAXE_CONFIRM_STATE_RESET") != "1":
+        raise SystemExit(
+            f"Refusing external state reset target {target}: "
+            "set VIRTUALAXE_CONFIRM_STATE_RESET=1 to confirm recursive deletion."
+        )
+    return target
+
+
 def command_state_reset(args: argparse.Namespace) -> int:
     profile = load_profile(args.profile)
-    state_dir = Path(args.state_dir).resolve() if args.state_dir else (STATE_ROOT / args.source / profile["id"])
+    state_dir = resolve_state_reset_dir(args, profile["id"])
     if state_dir.exists():
+        if not state_dir.is_dir():
+            raise SystemExit(f"Refusing state reset target {state_dir}: target is not a directory.")
         shutil.rmtree(state_dir)
     payload = {"source": args.source, "profile": profile["id"], "reset": str(state_dir)}
     print_payload(payload, args.json)

@@ -74,7 +74,10 @@ Command safety classes are defined in `docs/command-contract.md`:
 
 Do not run `make verify-release` or qualification mode without explicit
 approval in the current session. Do not delete local state or release evidence
-without first reviewing the target and obtaining approval.
+without first reviewing the target and obtaining approval. `state reset`
+accepts managed `.state/*` targets; an external custom target additionally
+requires `VIRTUALAXE_CONFIRM_STATE_RESET=1` and protected paths are always
+refused.
 
 ## Patch Changes
 

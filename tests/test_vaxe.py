@@ -1324,6 +1324,112 @@ def test_virtualaxe_verify_release_parser_accepts_qualification_mode():
     assert args.qualification is True
 
 
+def test_virtualaxe_state_reset_deletes_managed_profile_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+):
+    module = load_virtualaxe_module()
+    state_root = tmp_path / ".state"
+    target = state_root / "bitaxe" / "gamma"
+    target.mkdir(parents=True)
+    (target / "nvs.bin").write_bytes(b"state")
+    monkeypatch.setattr(module, "STATE_ROOT", state_root)
+
+    args = module.build_parser().parse_args(["state", "reset", "--json"])
+
+    assert module.command_state_reset(args) == 0
+    assert not target.exists()
+    assert json.loads(capsys.readouterr().out)["reset"] == str(target)
+
+
+def test_virtualaxe_state_reset_refuses_external_target_without_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    module = load_virtualaxe_module()
+    state_root = tmp_path / "managed-state"
+    external = tmp_path / "external-state"
+    external.mkdir()
+    sentinel = external / "keep"
+    sentinel.write_text("present", encoding="utf-8")
+    monkeypatch.setattr(module, "STATE_ROOT", state_root)
+    monkeypatch.delenv("VIRTUALAXE_CONFIRM_STATE_RESET", raising=False)
+    args = module.build_parser().parse_args(["state", "reset", "--state-dir", str(external)])
+
+    with pytest.raises(SystemExit, match="VIRTUALAXE_CONFIRM_STATE_RESET=1"):
+        module.command_state_reset(args)
+
+    assert sentinel.read_text(encoding="utf-8") == "present"
+
+
+def test_virtualaxe_state_reset_allows_confirmed_external_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    module = load_virtualaxe_module()
+    state_root = tmp_path / "managed-state"
+    external = tmp_path / "external-state"
+    external.mkdir()
+    (external / "nvs.bin").write_bytes(b"state")
+    monkeypatch.setattr(module, "STATE_ROOT", state_root)
+    monkeypatch.setenv("VIRTUALAXE_CONFIRM_STATE_RESET", "1")
+    args = module.build_parser().parse_args(["state", "reset", "--state-dir", str(external)])
+
+    assert module.command_state_reset(args) == 0
+    assert not external.exists()
+
+
+def test_virtualaxe_state_reset_always_refuses_protected_paths(monkeypatch: pytest.MonkeyPatch):
+    module = load_virtualaxe_module()
+    monkeypatch.setenv("VIRTUALAXE_CONFIRM_STATE_RESET", "1")
+    monkeypatch.setattr(module.shutil, "rmtree", lambda _path: pytest.fail("protected path reached rmtree"))
+
+    protected_paths = (
+        Path("/"),
+        module.ROOT_DIR,
+        module.ROOT_DIR / "docs",
+        Path.home(),
+        Path(module.tempfile.gettempdir()),
+        module.STATE_ROOT,
+    )
+    for protected in protected_paths:
+        args = module.build_parser().parse_args(["state", "reset", "--state-dir", str(protected)])
+        with pytest.raises(SystemExit, match="Refusing unsafe state reset target"):
+            module.command_state_reset(args)
+
+
+def test_virtualaxe_state_reset_refuses_source_path_traversal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    module = load_virtualaxe_module()
+    monkeypatch.setattr(module, "STATE_ROOT", tmp_path / "managed-state")
+    monkeypatch.setattr(module.shutil, "rmtree", lambda _path: pytest.fail("escaped path reached rmtree"))
+    args = module.build_parser().parse_args(["state", "reset", "--source", "../../outside"])
+
+    with pytest.raises(SystemExit, match="selected source escapes"):
+        module.command_state_reset(args)
+
+
+def test_virtualaxe_state_reset_checks_resolved_symlink_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    module = load_virtualaxe_module()
+    state_root = tmp_path / "managed-state"
+    state_root.mkdir()
+    link = state_root / "linked-repository"
+    link.symlink_to(module.ROOT_DIR, target_is_directory=True)
+    monkeypatch.setattr(module, "STATE_ROOT", state_root)
+    monkeypatch.setenv("VIRTUALAXE_CONFIRM_STATE_RESET", "1")
+    monkeypatch.setattr(module.shutil, "rmtree", lambda _path: pytest.fail("symlink target reached rmtree"))
+    args = module.build_parser().parse_args(["state", "reset", "--state-dir", str(link)])
+
+    with pytest.raises(SystemExit, match="protected path"):
+        module.command_state_reset(args)
+
+
 def test_virtualaxe_verify_submit_replay_parser_defaults_to_gamma_cpu_harness():
     module = load_virtualaxe_module()
 
