@@ -77,6 +77,161 @@ def test_vaxe_help_describes_profile_and_simulation_options():
     assert "Use bitronics or nerdminers; public is optional, or provide host:port" in output
     assert "Enable the loopback-only /sim/* UI controls" in output
     assert "Firmware HTTP port behind the Simulation Actions proxy" in output
+    assert "Inspect the selected build and runtime without changing local state" in output
+    assert "Emit machine-readable status JSON" in output
+
+
+def test_vaxe_parser_limits_json_and_pool_options_for_status():
+    module = load_module()
+
+    status_args = module.parse_args(["--source", "bitaxe", "--status", "--json"])
+    assert status_args.status is True
+    assert status_args.json is True
+
+    with pytest.raises(SystemExit):
+        module.parse_args(["--source", "bitaxe", "--json"])
+    with pytest.raises(SystemExit):
+        module.parse_args(["--source", "bitaxe", "--status", "--pool", "bitronics"])
+
+
+def test_vaxe_status_does_not_prepare_source_or_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+):
+    module = load_module()
+    virtualaxe = load_virtualaxe_module()
+
+    monkeypatch.setattr(module, "load_virtualaxe_module", lambda: virtualaxe)
+    monkeypatch.setattr(virtualaxe, "default_output_dir", lambda *_args: tmp_path / "out")
+    monkeypatch.setattr(virtualaxe, "STATE_ROOT", tmp_path / ".state")
+    monkeypatch.setattr(module, "runtime_is_active", lambda *_args: False)
+    monkeypatch.setattr(
+        virtualaxe,
+        "ensure_git_source",
+        lambda *_args, **_kwargs: pytest.fail("status must not fetch or prepare source state"),
+    )
+    monkeypatch.setattr(module, "ensure_runtime_available", lambda *_args: pytest.fail("status must not start QEMU"))
+
+    assert module.main(["--source", "bitaxe", "--status", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schemaVersion"] == 1
+    assert payload["source"] == "bitaxe"
+    assert payload["profile"] == "gamma"
+    assert payload["image"]["status"] == "missing"
+    assert payload["runtime"] == {
+        "active": False,
+        "apiReachable": False,
+        "apiUrl": "http://127.0.0.1:18080/api/system/info",
+        "axeosUrl": "http://127.0.0.1:18080",
+        "mode": None,
+        "pool": None,
+        "shares": None,
+    }
+
+
+def test_vaxe_status_reports_available_image_from_tracked_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    module = load_module()
+    virtualaxe = load_virtualaxe_module()
+    profile = virtualaxe.load_profile("gamma")
+    source = virtualaxe.source_metadata("bitaxe")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    image_path = out_dir / "qemu_flash.bin"
+    image_path.write_bytes(b"flash")
+    patches = [
+        {"file": patch["patch"], "sha256": patch["sha256"]}
+        for patch in virtualaxe.patch_series_metadata("bitaxe")
+    ]
+    (out_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "sourceName": "bitaxe",
+                "canonicalSourceName": "bitaxe",
+                "configuredUpstreamRef": source.ref,
+                "configuredResolvedCommit": source.resolved_commit,
+                "resolvedUpstreamCommit": source.resolved_commit,
+                "patchSeriesSha256": module.patch_series_sha256(source, virtualaxe.patch_series_metadata("bitaxe")),
+                "virtualProfile": "gamma",
+                "virtualAsicMode": virtualaxe.DEFAULT_VIRTUAL_ASIC_MODE,
+                "profileFileSha256": virtualaxe.file_sha256(Path(profile["path"])),
+                "patches": patches,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(virtualaxe, "default_output_dir", lambda *_args: out_dir)
+    monkeypatch.setattr(virtualaxe, "build_inputs_newer_than_flash", lambda _path: False)
+
+    result = module.inspect_image(virtualaxe, "bitaxe", profile)
+
+    assert result["status"] == "available"
+    assert result["staleReasons"] == []
+
+
+def test_vaxe_status_reports_stale_image_provenance(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    module = load_module()
+    virtualaxe = load_virtualaxe_module()
+    profile = virtualaxe.load_profile("gamma")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / "qemu_flash.bin").write_bytes(b"flash")
+    (out_dir / "manifest.json").write_text(
+        json.dumps({"sourceName": "bitaxe", "configuredResolvedCommit": "0" * 40}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(virtualaxe, "default_output_dir", lambda *_args: out_dir)
+    monkeypatch.setattr(virtualaxe, "build_inputs_newer_than_flash", lambda _path: False)
+
+    result = module.inspect_image(virtualaxe, "bitaxe", profile)
+
+    assert result["status"] == "stale"
+    assert "manifest configuredResolvedCommit does not match tracked configuration" in result["staleReasons"]
+
+
+def test_vaxe_status_reports_simulation_proxy_and_firmware_metrics(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    module = load_module()
+    requested_urls: list[str] = []
+
+    def fake_fetch(url: str, *, timeout: float = 1.0):
+        requested_urls.append(url)
+        if url.endswith("/sim/capabilities"):
+            return {"enabled": True}
+        return {
+            "stratumURL": "pool.bitronics.store",
+            "stratumPort": 3334,
+            "poolDifficulty": 0.0005,
+            "sharesAccepted": 7,
+            "sharesRejected": 0,
+        }
+
+    monkeypatch.setattr(module, "runtime_is_active", lambda *_args: True)
+    monkeypatch.setattr(module, "fetch_optional_json", fake_fetch)
+
+    result = module.inspect_runtime(
+        container_name="virtualaxe-qemu-bitaxe-gamma",
+        out_dir=tmp_path,
+        sim_backend_port=19082,
+    )
+
+    assert requested_urls == [
+        "http://127.0.0.1:18080/sim/capabilities",
+        "http://127.0.0.1:19082/api/system/info",
+    ]
+    assert result["mode"] == "simulation-actions"
+    assert result["apiReachable"] is True
+    assert result["pool"] == {
+        "host": "pool.bitronics.store",
+        "port": 3334,
+        "assignedDifficulty": 0.0005,
+    }
+    assert result["shares"] == {"accepted": 7, "rejected": 0}
 
 
 def test_vaxe_parser_accepts_sim_actions_flag():

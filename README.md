@@ -117,6 +117,8 @@ Windows shells are not part of the tested release matrix.
 | `./vaxe` | Print usage and examples without starting QEMU. |
 | `./vaxe --source bitaxe` | Run the default Bitaxe ESP-Miner source explicitly. |
 | `./vaxe --source nerdnos` | Run the NerdNos source with the same virtual Gamma profile. |
+| `./vaxe --source bitaxe --status` | Inspect the selected image and runtime without fetching, building, or starting anything. |
+| `./vaxe --source bitaxe --status --json` | Emit the same read-only status as machine-readable JSON. |
 | `./vaxe --source bitaxe --pool bitronics` | Start Bitaxe firmware with the Bitronics preset. |
 | `./vaxe --source bitaxe --pool nerdminers` | Start Bitaxe firmware with the Nerdminers preset. |
 | `make build SOURCE=bitaxe` | Build the default reusable QEMU image without starting QEMU. |
