@@ -529,6 +529,8 @@ def test_release_readiness_commands_are_public_and_documented():
         assert f"{target}:" in makefile
         assert f"make {target}" in command_contract
     assert "make validate" in readme
+    assert "make validate SOURCE=bitaxe" in command_contract
+    assert "make validate SOURCE=nerdnos" in command_contract
     assert "make clean-clone-smoke" in command_contract
     assert "make drift-check" in command_contract
     assert "bootstrap:" not in makefile
@@ -727,7 +729,8 @@ def test_command_safety_docs_use_precise_side_effect_classes():
         assert safety_class in command_contract
 
     assert "make validate       [ignored-state mutating]" in makefile
-    assert "| `make validate` | ignored-state mutating |" in command_contract
+    assert "| `make validate SOURCE=bitaxe` | ignored-state mutating |" in command_contract
+    assert "| `make validate SOURCE=nerdnos` | ignored-state mutating |" in command_contract
     assert "| `make build SOURCE=bitaxe` | ignored-state mutating, external/live when first-run dependencies are missing | Builds the default Bitaxe reusable QEMU image under `out/`" in command_contract
     assert "| `make build SOURCE=nerdnos` | ignored-state mutating, external/live when first-run dependencies are missing | Builds the NerdNos reusable QEMU image under `out/nerdnos/gamma/`" in command_contract
     assert "| `make validate-config` | tracked-source read-only |" in command_contract

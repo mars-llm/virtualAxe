@@ -24,7 +24,8 @@ right gate without guessing.
 | Command | Class | Contract |
 | --- | --- | --- |
 | `make audit` | report-generating | Writes JSON and Markdown readiness reports under ignored `out/audit/`. |
-| `make validate` | ignored-state mutating | Prepares deterministic local dependencies, then runs local checks plus configured-pin patch and submit gates. It may create `.sources/`, `.worktrees/`, `.state/`, `.venv/`, browser `node_modules/`, `out/`, and disposable patch worktrees. It never runs live pools. |
+| `make validate SOURCE=bitaxe` | ignored-state mutating | Prepares deterministic local dependencies, then runs local checks plus the Bitaxe configured-pin patch, firmware-unit, and submit-replay gates. It may create `.sources/`, `.worktrees/`, `.state/`, `.venv/`, browser `node_modules/`, `out/`, and disposable patch worktrees. It never runs live pools. |
+| `make validate SOURCE=nerdnos` | ignored-state mutating | Runs the same deterministic contract against the configured NerdNos pin, using its source-specific API-boot and submit-replay gates. It never runs live pools. |
 | `make validate-lite` | ignored-state mutating | Prepares the locked Python environment, then runs fast CI-safe checks: Python compile, shell syntax, config validation, secret scan, release hygiene, and Python tests. |
 | `make validate-config` | tracked-source read-only | Validates tracked source, profile, and NVS configuration. Generated manifests are validated only when passed explicitly to the validator. |
 | `make secret-scan` | tracked-source read-only | Scans tracked files for private material and reports location plus classification only. |
@@ -59,8 +60,8 @@ right gate without guessing.
 
 ## Release Rule
 
-Public release readiness requires `make validate`, fresh same-session
-`make verify-release` runs for the sources being claimed, and
+Public release readiness requires `make validate SOURCE=<source>`, fresh
+same-session `make verify-release SOURCE=<source>` runs for the sources being claimed, and
 `make release-evidence` to normalize ignored release evidence. If live
 verification has not been run for a claimed source, that source is not release
 ready.

@@ -11,7 +11,7 @@ help:
 	@printf "Human operator entrypoint: ./vaxe --source bitaxe (or --source nerdnos)\n"
 	@printf "make targets below are repo/developer helpers:\n"
 	@printf "virtualAxe targets:\n"
-	@printf "  make validate       [ignored-state mutating] Prepare local deps and run the deterministic release gate\n"
+	@printf "  make validate       [ignored-state mutating] Prepare local deps and validate SOURCE (bitaxe by default)\n"
 	@printf "  make validate-lite  [ignored-state mutating] Prepare Python deps and run fast network-free validation for CI\n"
 	@printf "  make validate-config [tracked-source read-only] Validate tracked release configuration\n"
 	@printf "  make secret-scan    [tracked-source read-only] Scan tracked files for private material\n"

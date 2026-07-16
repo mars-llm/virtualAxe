@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import pytest
+
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
@@ -145,17 +147,34 @@ def test_validate_full_gate_prepares_local_state_and_avoids_live_pools():
     module = load_script("validate.py")
 
     full = module.checks(lite=False)
+    nerdnos = module.checks(lite=False, source_name="nerdnos")
     lite = module.checks(lite=True)
     full_names = [name for name, _command, _gated in full]
     full_commands = [" ".join(command) for _name, command, _gated in full]
+    nerdnos_commands = [" ".join(command) for _name, command, _gated in nerdnos]
 
     assert "bootstrap" not in full_names
     assert "bootstrap" not in [name for name, _command, _gated in lite]
     assert "patch-check" in full_names
     assert "verify-test-ci" in full_names
     assert any("verify-submit-replay" in command for command in full_commands)
+    assert any("patch-check SOURCE=bitaxe" in command for command in full_commands)
+    assert any("verify-test-ci --source bitaxe" in command for command in full_commands)
+    assert any("patch-check SOURCE=nerdnos" in command for command in nerdnos_commands)
+    assert any("verify-test-ci --source nerdnos" in command for command in nerdnos_commands)
+    assert any("verify-submit-replay SOURCE=nerdnos" in command for command in nerdnos_commands)
     assert not any("verify-release" in command for command in full_commands)
     assert not any("git clean" in command for command in full_commands)
+
+
+def test_validate_resolves_source_aliases_and_rejects_unknown_sources():
+    module = load_script("validate.py")
+
+    assert module.validation_source({}) == "bitaxe"
+    assert module.validation_source({"SOURCE": "vanilla"}) == "bitaxe"
+    assert module.validation_source({"SOURCE": "nerdnos"}) == "nerdnos"
+    with pytest.raises(module.SourceRegistryError, match="Unknown source"):
+        module.validation_source({"SOURCE": "missing"})
 
 
 def test_validate_classifies_setup_failures_as_dependency_issues(monkeypatch):
