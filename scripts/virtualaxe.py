@@ -1593,7 +1593,11 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     available_profiles = tuple(sorted(p.stem for p in PROFILES_DIR.glob("*.json")))
 
-    doctor = subparsers.add_parser("doctor")
+    doctor = subparsers.add_parser(
+        "doctor",
+        help="Inspect source caches, patch health, profiles, and required tools.",
+        description="Inspect configured sources, prepare patch-health worktrees, and report local tool availability.",
+    )
     doctor.add_argument("--json", action="store_true")
     doctor.set_defaults(func=command_doctor)
 
@@ -1605,8 +1609,13 @@ def build_parser() -> argparse.ArgumentParser:
     patch_check.add_argument("--json", action="store_true")
     patch_check.set_defaults(func=command_patch_check)
 
+    runtime_help = {
+        "build": "Build a reusable source-specific QEMU firmware image.",
+        "run": "Build when needed, then start the selected firmware in QEMU.",
+        "verify": "Run local QEMU API and browser integration checks.",
+    }
     for name in ("build", "run", "verify"):
-        sub = subparsers.add_parser(name)
+        sub = subparsers.add_parser(name, help=runtime_help[name], description=runtime_help[name])
         sub.add_argument("--source", default=source_registry().default_source)
         sub.add_argument("--profile", choices=available_profiles, default="gamma")
         sub.add_argument("--out-dir")
@@ -1623,7 +1632,11 @@ def build_parser() -> argparse.ArgumentParser:
         else:
             sub.set_defaults(func=command_build)
 
-    verify_submit_replay = subparsers.add_parser("verify-submit-replay")
+    verify_submit_replay = subparsers.add_parser(
+        "verify-submit-replay",
+        help="Run deterministic guest-side submit-boundary replay.",
+        description="Run deterministic local Stratum replay through the guest firmware submit path.",
+    )
     verify_submit_replay.add_argument("--source", default=source_registry().default_source)
     verify_submit_replay.add_argument("--profile", choices=available_profiles, default="gamma")
     verify_submit_replay.add_argument("--out-dir")
@@ -1641,7 +1654,10 @@ def build_parser() -> argparse.ArgumentParser:
     verify_submit_replay.add_argument("--qemu-container-name", default=DEFAULT_SUBMIT_REPLAY_CONTAINER_NAME)
     verify_submit_replay.set_defaults(func=command_verify_submit_replay)
 
-    dashboard = subparsers.add_parser("dashboard")
+    dashboard = subparsers.add_parser(
+        "dashboard",
+        help="Start the local operator dashboard for a virtual runtime.",
+    )
     dashboard.add_argument("--source", default=source_registry().default_source)
     dashboard.add_argument("--profile", choices=available_profiles, default="gamma")
     dashboard.add_argument("--out-dir")
@@ -1651,7 +1667,11 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard.add_argument("--no-auto-start", action="store_true")
     dashboard.set_defaults(func=command_dashboard)
 
-    verify_release = subparsers.add_parser("verify-release")
+    verify_release = subparsers.add_parser(
+        "verify-release",
+        help="Run the automated external/live three-pool release gate.",
+        description="Run automated live pool verification for the selected source.",
+    )
     verify_release.add_argument("--source", default=source_registry().default_source)
     verify_release.add_argument("--pool-user", default=os.environ.get("VERIFY_POOL_USER", DEFAULT_VERIFY_RELEASE_POOL_USER))
     verify_release.add_argument("--out-dir")
@@ -1662,16 +1682,27 @@ def build_parser() -> argparse.ArgumentParser:
     verify_release.add_argument("--qualification", action="store_true")
     verify_release.set_defaults(func=command_verify_release)
 
-    verify_test_ci = subparsers.add_parser("verify-test-ci")
+    verify_test_ci = subparsers.add_parser(
+        "verify-test-ci",
+        help="Run source-specific firmware unit or API-boot proof.",
+    )
     verify_test_ci.add_argument("--source", default=source_registry().default_source)
     verify_test_ci.add_argument("--out-dir")
     verify_test_ci.add_argument("--json", action="store_true")
     verify_test_ci.set_defaults(func=command_verify_test_ci)
 
-    state = subparsers.add_parser("state")
+    state = subparsers.add_parser(
+        "state",
+        help="Inspect, import, or delete ignored local NVS state.",
+    )
     state_subparsers = state.add_subparsers(dest="state_command", required=True)
+    state_help = {
+        "export": "Report the selected ignored NVS state paths.",
+        "import": "Copy an NVS image into the selected ignored state directory.",
+        "reset": "Delete the selected local state directory recursively.",
+    }
     for sub_name, handler in (("export", command_state_export), ("import", command_state_import), ("reset", command_state_reset)):
-        state_parser = state_subparsers.add_parser(sub_name)
+        state_parser = state_subparsers.add_parser(sub_name, help=state_help[sub_name])
         state_parser.add_argument("--source", default=source_registry().default_source)
         state_parser.add_argument("--profile", choices=available_profiles, default="gamma")
         state_parser.add_argument("--state-dir")

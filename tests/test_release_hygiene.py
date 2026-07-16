@@ -736,6 +736,10 @@ def test_command_safety_docs_use_precise_side_effect_classes():
     assert "| `make validate-config` | tracked-source read-only |" in command_contract
     assert "| `make audit` | report-generating |" in command_contract
     assert "| `make verify-release` | external/live |" in command_contract
+    assert "make doctor         [ignored-state mutating]" in makefile
+    assert "| `make doctor` | ignored-state mutating |" in command_contract
+    assert "| `python3 scripts/virtualaxe.py state reset` | destructive |" in command_contract
+    assert "custom paths are not currently constrained to `.state/`" in command_contract
     assert "| `make validate` | read-only |" not in command_contract
 
 

@@ -56,7 +56,8 @@ right gate without guessing.
 | `make test-api` | runtime mutating | Runs API validation against a local virtual runtime. |
 | `make test-browser` | runtime mutating | Runs browser smoke validation against a local virtual runtime. |
 | `make verify-persistence` | runtime mutating | Verifies settings persistence across restart/rebuild. |
-| `make doctor` | tracked-source read-only | Probes canonical configured sources and local tool availability. |
+| `make doctor` | ignored-state mutating | Probes configured source caches and local tools, and prepares source-specific patch worktrees to report patch health. It does not fetch missing sources. |
+| `python3 scripts/virtualaxe.py state reset` | destructive | Recursively deletes the selected local state directory. Review `--state-dir` before use; custom paths are not currently constrained to `.state/`. |
 
 ## Release Rule
 

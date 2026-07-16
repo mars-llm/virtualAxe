@@ -1139,6 +1139,26 @@ def test_virtualaxe_parser_rejects_unsupported_gamma_duo_profile():
         parser.parse_args(["build", "--profile", "gamma-duo"])
 
 
+def test_virtualaxe_help_describes_each_developer_subcommand():
+    module = load_virtualaxe_module()
+
+    output = " ".join(module.build_parser().format_help().split())
+
+    for description in (
+        "Inspect source caches, patch health, profiles, and required tools.",
+        "Apply the ESP-Miner patch stack in a disposable directory.",
+        "Build a reusable source-specific QEMU firmware image.",
+        "Build when needed, then start the selected firmware in QEMU.",
+        "Run local QEMU API and browser integration checks.",
+        "Run deterministic guest-side submit-boundary replay.",
+        "Start the local operator dashboard for a virtual runtime.",
+        "Run the automated external/live three-pool release gate.",
+        "Run source-specific firmware unit or API-boot proof.",
+        "Inspect, import, or delete ignored local NVS state.",
+    ):
+        assert description in output
+
+
 def test_virtualaxe_parser_rejects_host_virtual_asic_mode():
     module = load_virtualaxe_module()
     parser = module.build_parser()
