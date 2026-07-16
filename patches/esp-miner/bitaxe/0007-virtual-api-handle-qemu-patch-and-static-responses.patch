@@ -1,4 +1,4 @@
-From 6a0f02af64ef2b05daf174e12df53ed3ee163497 Mon Sep 17 00:00:00 2001
+From 9da498377a88c13e393470089c4c30a796390359 Mon Sep 17 00:00:00 2001
 From: virtualAxe <virtualaxe@example.invalid>
 Date: Wed, 6 May 2026 12:37:21 +0200
 Subject: [PATCH 07/13] virtual api: handle qemu patch and static responses
@@ -12,7 +12,6 @@ state synchronization.
 Verify: run API settings tests, persistence checks, and make verify-submit-replay.
 Removal impact: settings updates can stall or desynchronize while AxeOS is used
 against the virtual firmware.
-
 ---
  main/http_server/http_server.c | 29 ++++++++++++++++++++++++-----
  main/system.c                  | 28 ++++++++++++++++++++++++++--
@@ -20,10 +19,10 @@ against the virtual firmware.
  3 files changed, 51 insertions(+), 7 deletions(-)
 
 diff --git a/main/http_server/http_server.c b/main/http_server/http_server.c
-index 0937ff5..ca50295 100644
+index d97e121..b078e04 100644
 --- a/main/http_server/http_server.c
 +++ b/main/http_server/http_server.c
-@@ -485,8 +485,16 @@ static esp_err_t rest_common_get_handler(httpd_req_t * req)
+@@ -470,8 +470,16 @@ static esp_err_t rest_common_get_handler(httpd_req_t * req)
          httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
      }
  
@@ -41,7 +40,7 @@ index 0937ff5..ca50295 100644
      do {
          /* Read file in chunks into the scratch buffer */
          read_bytes = read(fd, chunk, SCRATCH_BUFSIZE);
-@@ -496,6 +504,7 @@ static esp_err_t rest_common_get_handler(httpd_req_t * req)
+@@ -481,6 +489,7 @@ static esp_err_t rest_common_get_handler(httpd_req_t * req)
              /* Send the buffer contents as HTTP response chunk */
              if (httpd_resp_send_chunk(req, chunk, read_bytes) != ESP_OK) {
                  close(fd);
@@ -49,7 +48,7 @@ index 0937ff5..ca50295 100644
                  ESP_LOGE(TAG, "File sending failed!");
                  /* Abort sending file */
                  httpd_resp_sendstr_chunk(req, NULL);
-@@ -507,10 +516,11 @@ static esp_err_t rest_common_get_handler(httpd_req_t * req)
+@@ -492,10 +501,11 @@ static esp_err_t rest_common_get_handler(httpd_req_t * req)
      } while (read_bytes > 0);
      /* Close file after sending complete */
      close(fd);
@@ -63,7 +62,7 @@ index 0937ff5..ca50295 100644
  }
  
  static esp_err_t handle_options_request(httpd_req_t * req)
-@@ -658,16 +668,24 @@ static esp_err_t PATCH_update_settings(httpd_req_t * req)
+@@ -655,16 +665,24 @@ static esp_err_t PATCH_update_settings(httpd_req_t * req)
  
      int total_len = req->content_len;
      int cur_len = 0;
@@ -90,7 +89,7 @@ index 0937ff5..ca50295 100644
              /* Respond with 500 Internal Server Error */
              httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to post control value");
              return ESP_OK;
-@@ -677,6 +695,7 @@ static esp_err_t PATCH_update_settings(httpd_req_t * req)
+@@ -674,6 +692,7 @@ static esp_err_t PATCH_update_settings(httpd_req_t * req)
      buf[total_len] = '\0';
  
      cJSON * root = cJSON_Parse(buf);
@@ -99,13 +98,13 @@ index 0937ff5..ca50295 100644
          httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
          return ESP_OK;
 diff --git a/main/system.c b/main/system.c
-index 63d4ad0..b3f8c80 100644
+index 70640fa..30e1eb6 100644
 --- a/main/system.c
 +++ b/main/system.c
-@@ -32,12 +32,14 @@
- #include "utils.h"
- #include "self_test.h"
+@@ -34,12 +34,14 @@
  #include "filesystem.h"
+ #include "work_queue.h"
+ #include "hashrate_monitor_task.h"
 +#include "asic.h"
  
  static const char * TAG = "system";
@@ -117,7 +116,7 @@ index 63d4ad0..b3f8c80 100644
  
  void SYSTEM_init_system(GlobalState * GLOBAL_STATE)
  {
-@@ -263,12 +265,34 @@ static esp_err_t SYSTEM_init_virtual_peripherals(GlobalState * GLOBAL_STATE)
+@@ -304,12 +306,34 @@ static esp_err_t SYSTEM_init_virtual_peripherals(GlobalState * GLOBAL_STATE)
      }
  
      GLOBAL_STATE->SYSTEM_MODULE.is_screen_active = false;
@@ -155,16 +154,17 @@ index 63d4ad0..b3f8c80 100644
  {
      SystemModule * module = &GLOBAL_STATE->SYSTEM_MODULE;
 diff --git a/main/system.h b/main/system.h
-index 57040ce..7825f4a 100644
+index 8bde97e..f5345a0 100644
 --- a/main/system.h
 +++ b/main/system.h
-@@ -7,6 +7,7 @@
+@@ -8,6 +8,7 @@
  void SYSTEM_init_system(GlobalState * GLOBAL_STATE);
  void SYSTEM_init_versions(GlobalState * GLOBAL_STATE);
  esp_err_t SYSTEM_init_peripherals(GlobalState * GLOBAL_STATE);
 +void SYSTEM_sync_virtual_runtime_state(GlobalState * GLOBAL_STATE);
  
- void SYSTEM_notify_accepted_share(GlobalState * GLOBAL_STATE);
- void SYSTEM_notify_rejected_share(GlobalState * GLOBAL_STATE, char * error_msg);
+ // Clear the stratum job queue and valid-job tracking on a clean-jobs event,
+ // and reset hashrate measurements so reconnects don't spike the average.
 -- 
 2.50.1 (Apple Git-155)
+

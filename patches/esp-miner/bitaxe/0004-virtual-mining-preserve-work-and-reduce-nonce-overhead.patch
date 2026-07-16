@@ -1,4 +1,4 @@
-From 2b62a9dff0e0e0a8ee849e97ff539c0a635e9b8e Mon Sep 17 00:00:00 2001
+From 0380c62db44d82fea6a2be6a1f7e236425363118 Mon Sep 17 00:00:00 2001
 From: virtualAxe <virtualaxe@example.invalid>
 Date: Wed, 6 May 2026 12:37:20 +0200
 Subject: [PATCH 04/13] virtual mining: preserve work and reduce nonce overhead
@@ -11,11 +11,10 @@ Upstream surface: virtual ASIC work snapshots and job generation cadence.
 Verify: run make verify-submit-replay and verify-test-ci.
 Removal impact: the guest miner can restart useful work too often and miss
 low-difficulty submit opportunities.
-
 ---
  components/asic/virtual_asic.c | 87 ++++++++++++++++++++++++----------
- main/tasks/create_jobs_task.c  | 59 +++++++++++++++++++++--
- 2 files changed, 117 insertions(+), 29 deletions(-)
+ main/tasks/create_jobs_task.c  | 55 +++++++++++++++++++--
+ 2 files changed, 114 insertions(+), 28 deletions(-)
 
 diff --git a/components/asic/virtual_asic.c b/components/asic/virtual_asic.c
 index c0d9069..038e9e3 100644
@@ -154,16 +153,19 @@ index c0d9069..038e9e3 100644
          strncpy(snapshot->jobid, source->jobid, sizeof(snapshot->jobid) - 1);
      }
 diff --git a/main/tasks/create_jobs_task.c b/main/tasks/create_jobs_task.c
-index 21425bb..71eb0b4 100644
+index 57e9668..0cf059f 100644
 --- a/main/tasks/create_jobs_task.c
 +++ b/main/tasks/create_jobs_task.c
-@@ -19,10 +19,13 @@ static const char *TAG = "create_jobs_task";
- #define MAX_EXTRANONCE2_STR (MAX_EXTRANONCE2_LEN * 2 + 1)
- 
+@@ -25,6 +25,8 @@ static const char *TAG = "create_jobs_task";
  static void generate_work(GlobalState *GLOBAL_STATE, mining_notify *notification, uint64_t extranonce_2, double difficulty);
+ static void generate_work_sv2(GlobalState *GLOBAL_STATE, sv2_job_t *job, double difficulty);
+ static void generate_work_sv2_ext(GlobalState *GLOBAL_STATE, sv2_ext_job_t *job, double difficulty, uint64_t extranonce_2_counter);
 +static bool use_periodic_work_refresh(const GlobalState *GLOBAL_STATE);
 +static void update_virtual_active_job_difficulty(GlobalState *GLOBAL_STATE, double difficulty);
  
+ // Free a work item using the correct free function for the protocol it was created under
+ static void free_work_item(GlobalState *GLOBAL_STATE, void *work, stratum_protocol_t protocol)
+@@ -44,6 +46,7 @@ static void free_work_item(GlobalState *GLOBAL_STATE, void *work, stratum_protoc
  void create_jobs_task(void *pvParameters)
  {
      GlobalState *GLOBAL_STATE = (GlobalState *)pvParameters;
@@ -171,40 +173,41 @@ index 21425bb..71eb0b4 100644
  
      // Initialize ASIC task module (moved from ASIC_task)
      GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs = heap_caps_malloc(sizeof(bm_job *) * 128, MALLOC_CAP_SPIRAM);
-@@ -36,14 +39,19 @@ void create_jobs_task(void *pvParameters)
-     mining_notify *current_mining_notification = NULL;
+@@ -58,6 +61,7 @@ void create_jobs_task(void *pvParameters)
+     stratum_protocol_t current_work_protocol = GLOBAL_STATE->stratum_protocol;
      uint64_t extranonce_2 = 0;
      int timeout_ms = ASIC_get_asic_job_frequency_ms(GLOBAL_STATE);
 +    const int virtual_poll_timeout_ms = 1000;
  
      ESP_LOGI(TAG, "ASIC Job Interval: %d ms", timeout_ms);
      ESP_LOGI(TAG, "ASIC Ready!");
-     
-     while (1) {
+@@ -81,8 +85,12 @@ void create_jobs_task(void *pvParameters)
+         }
+ 
          uint64_t start_time = esp_timer_get_time();
--        mining_notify *new_mining_notification = (mining_notify *)queue_dequeue_timeout(&GLOBAL_STATE->stratum_queue, timeout_ms);
+-        void *new_work = queue_dequeue_timeout(&GLOBAL_STATE->stratum_queue, timeout_ms);
 -        timeout_ms -= (esp_timer_get_time() - start_time) / 1000;
 +        int wait_timeout_ms = periodic_work_refresh ? timeout_ms : virtual_poll_timeout_ms;
-+        mining_notify *new_mining_notification = (mining_notify *)queue_dequeue_timeout(&GLOBAL_STATE->stratum_queue, wait_timeout_ms);
++        void *new_work = queue_dequeue_timeout(&GLOBAL_STATE->stratum_queue, wait_timeout_ms);
 +        if (periodic_work_refresh) {
 +            timeout_ms -= (esp_timer_get_time() - start_time) / 1000;
 +        }
 +        bool should_generate_work = false;
  
-         if (new_mining_notification != NULL) {
-             if (current_mining_notification != NULL) {
-@@ -68,7 +76,9 @@ void create_jobs_task(void *pvParameters)
- 
-             extranonce_2 = 0;
- 
--            if (!current_mining_notification->clean_jobs) {
-+            if (!periodic_work_refresh || current_mining_notification->clean_jobs) {
+         if (new_work != NULL) {
+             active_protocol = GLOBAL_STATE->stratum_protocol;
+@@ -142,7 +150,9 @@ void create_jobs_task(void *pvParameters)
+             } else {
+                 clean = ((mining_notify *)current_work)->clean_jobs;
+             }
+-            if (!clean) {
++            if (!periodic_work_refresh || clean) {
 +                should_generate_work = true;
 +            } else {
                  continue;
              }
          } else {
-@@ -76,15 +86,56 @@ void create_jobs_task(void *pvParameters)
+@@ -150,6 +160,20 @@ void create_jobs_task(void *pvParameters)
                  vTaskDelay(100 / portTICK_PERIOD_MS);
                  continue;
              }
@@ -221,20 +224,22 @@ index 21425bb..71eb0b4 100644
 +                    continue;
 +                }
 +            }
-+        }
 +
-+        if (!should_generate_work && !periodic_work_refresh) {
-+            continue;
+             // SV2 standard channel: the ASIC has enough nonce+version space
+             // (2^32 nonces x version rolls) to keep mining without re-feeding.
+             // Re-sending the same job restarts the nonce search from 0 and
+@@ -161,6 +185,10 @@ void create_jobs_task(void *pvParameters)
+             }
          }
  
--        // Generate and send job (either new work or incremented extranonce_2)
-+        // Generate and send work immediately for new jobs. Real hardware also
-+        // refreshes the same notify periodically, but the virtual ASIC path
-+        // keeps searching the current notify instead of restarting every
-+        // interval under QEMU.
-         generate_work(GLOBAL_STATE, current_mining_notification, extranonce_2, difficulty);
-         extranonce_2++;
-         timeout_ms = ASIC_get_asic_job_frequency_ms(GLOBAL_STATE);
++        if (!should_generate_work && !periodic_work_refresh) {
++            continue;
++        }
++
+         // Final protocol check before generating work — protocol may have switched
+         // during a timeout dequeue while we still hold stale current_work
+         active_protocol = GLOBAL_STATE->stratum_protocol;
+@@ -188,6 +216,27 @@ void create_jobs_task(void *pvParameters)
      }
  }
  
@@ -264,3 +269,4 @@ index 21425bb..71eb0b4 100644
      if (GLOBAL_STATE->extranonce_2_len > MAX_EXTRANONCE2_LEN) {
 -- 
 2.50.1 (Apple Git-155)
+

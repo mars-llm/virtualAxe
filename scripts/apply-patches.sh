@@ -148,6 +148,7 @@ if [[ -n "${PATCH_TARGET_DIR}" ]]; then
   rm -rf "${PATCH_TARGET_DIR}"
   git clone --no-local "${UPSTREAM_DIR}" "${PATCH_TARGET_DIR}" >/dev/null
   UPSTREAM_DIR="${PATCH_TARGET_DIR}"
+  git -C "${UPSTREAM_DIR}" fetch --no-tags origin "${UPSTREAM_REF}" >/dev/null
   git -C "${UPSTREAM_DIR}" checkout --detach "${UPSTREAM_REF}" >/dev/null
   if [[ "${INIT_SUBMODULES}" == "True" || "${INIT_SUBMODULES}" == "true" || "${INIT_SUBMODULES}" == "1" ]]; then
     git -C "${UPSTREAM_DIR}" submodule update --init --recursive >/dev/null

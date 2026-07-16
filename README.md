@@ -152,7 +152,7 @@ For example:
 
 | Alias | Upstream | Ref | Profile | Status |
 | --- | --- | --- | --- | --- |
-| `bitaxe` | [bitaxeorg/ESP-Miner](https://github.com/bitaxeorg/ESP-Miner) | `ce44b2bbfef60ef8830ab17b321cc295e0c0edc8` | `gamma` | `live_verified`: default source. Build, API boot, deterministic submit replay, and live accepted-share evidence pass. |
+| `bitaxe` | [bitaxeorg/ESP-Miner](https://github.com/bitaxeorg/ESP-Miner) | `v2.14.2` / `64680f8a4da0b9a3b532051f0aa18429fcf04e82` | `gamma` | `live_verified`: default source. Build, API boot, deterministic submit replay, and live accepted-share evidence pass. |
 | `nerdnos` | [shufps/ESP-Miner-NerdQAxePlus](https://github.com/shufps/ESP-Miner-NerdQAxePlus) | `v1.0.37` / `c18abafebde66c39f4bd8ae6d839088b84b4e79c` | `gamma` | `live_verified`: additional source. Build, API boot, deterministic submit replay, and live accepted-share evidence pass. |
 
 `bitaxe` and `nerdnos` select firmware source only. `gamma` remains the only

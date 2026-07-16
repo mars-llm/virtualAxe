@@ -65,6 +65,9 @@ def test_sources_expose_bitaxe_default_and_vanilla_alias():
 
     assert payload["defaultSource"] == "bitaxe"
     assert payload["aliases"]["vanilla"] == "bitaxe"
+    assert payload["sources"]["bitaxe"]["releaseTag"] == "v2.14.2"
+    assert payload["sources"]["bitaxe"]["resolvedCommit"] == "64680f8a4da0b9a3b532051f0aa18429fcf04e82"
+    assert payload["sources"]["bitaxe"]["initSubmodules"] is True
     assert payload["sources"]["bitaxe"]["supportState"] == "live_verified"
     assert module.validate_sources(ROOT_DIR / "configs" / "sources.json") == []
 

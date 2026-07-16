@@ -1,4 +1,4 @@
-From d811457946fc2ba1d8ceffee4ddd28a99e4e40f9 Mon Sep 17 00:00:00 2001
+From 294ce7c0a3125b13de75711fffc6ae0d04473fed Mon Sep 17 00:00:00 2001
 From: virtualAxe <virtualaxe@example.invalid>
 Date: Wed, 6 May 2026 12:37:21 +0200
 Subject: [PATCH 12/13] virtual api: keep settings updates responsive
@@ -11,17 +11,16 @@ Upstream surface: HTTP PATCH completion and NVS update queue processing.
 Verify: run API settings tests and verify-persistence.
 Removal impact: settings updates can block long enough to degrade AxeOS and pool
 configuration flows.
-
 ---
  main/http_server/http_server.c |   2 +-
  main/nvs_config.c              | 151 ++++++++++++++++++---------------
  2 files changed, 85 insertions(+), 68 deletions(-)
 
 diff --git a/main/http_server/http_server.c b/main/http_server/http_server.c
-index ca50295..c82f1dc 100644
+index b078e04..bce84f4 100644
 --- a/main/http_server/http_server.c
 +++ b/main/http_server/http_server.c
-@@ -708,7 +708,7 @@ static esp_err_t PATCH_update_settings(httpd_req_t * req)
+@@ -718,7 +718,7 @@ static esp_err_t PATCH_update_settings(httpd_req_t * req)
      }
  
      cJSON_Delete(root);
@@ -31,10 +30,10 @@ index ca50295..c82f1dc 100644
  }
  
 diff --git a/main/nvs_config.c b/main/nvs_config.c
-index 98b2888..df1bd86 100644
+index 951bb90..6dfdb68 100644
 --- a/main/nvs_config.c
 +++ b/main/nvs_config.c
-@@ -177,79 +177,96 @@ static void nvs_config_apply_fallback(NvsConfigKey key, Settings * setting)
+@@ -215,79 +215,96 @@ static void nvs_config_apply_fallback(NvsConfigKey key, Settings * setting)
      }
  }
  
@@ -200,3 +199,4 @@ index 98b2888..df1bd86 100644
      }
 -- 
 2.50.1 (Apple Git-155)
+

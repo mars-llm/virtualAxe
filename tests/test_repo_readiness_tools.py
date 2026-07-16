@@ -70,7 +70,7 @@ def test_drift_check_prepares_missing_source_cache(monkeypatch):
     sync_calls = []
 
     def fake_resolve(_source_dir, ref):
-        assert ref == "ce44b2bbfef60ef8830ab17b321cc295e0c0edc8"
+        assert ref == "64680f8a4da0b9a3b532051f0aa18429fcf04e82"
         return next(resolve_calls)
 
     def fake_sync(source_name, ref, *, reason):
@@ -103,7 +103,7 @@ def test_drift_check_prepares_missing_source_cache(monkeypatch):
     assert payload["sourceSync"]["status"] == "passed"
     assert payload["resolvedConfiguredRef"] == resolved_ref
     assert sync_calls == [
-        ("bitaxe", "ce44b2bbfef60ef8830ab17b321cc295e0c0edc8", "local source cache missing")
+        ("bitaxe", "64680f8a4da0b9a3b532051f0aa18429fcf04e82", "local source cache missing")
     ]
 
 
@@ -196,19 +196,28 @@ def test_validate_classifies_setup_failures_as_dependency_issues(monkeypatch):
     assert result["classification"] == "failed due to environment/dependency issue"
 
 
-def run_apply_patches_guard(target: str, source_dir: Path, *, home: Path | None = None):
+def run_apply_patches_guard(
+    target: str,
+    source_dir: Path,
+    *,
+    home: Path | None = None,
+    upstream_ref: str = "HEAD",
+    patch_series_file: Path | None = None,
+):
     env = os.environ.copy()
     env.update(
         {
             "SOURCE_DIR": str(source_dir),
             "PATCH_TARGET_DIR": target,
-            "UPSTREAM_REF": "HEAD",
+            "UPSTREAM_REF": upstream_ref,
             "GIT_COMMITTER_NAME": "virtualAxe test",
             "GIT_COMMITTER_EMAIL": "virtualaxe-test@example.invalid",
         }
     )
     if home is not None:
         env["HOME"] = str(home)
+    if patch_series_file is not None:
+        env["PATCH_SERIES_FILE"] = str(patch_series_file)
     return subprocess.run(
         ["bash", "scripts/apply-patches.sh"],
         cwd=ROOT_DIR,
@@ -254,5 +263,46 @@ def test_apply_patches_allows_virtualaxe_temp_targets(tmp_path):
         result = run_apply_patches_guard(str(target), source_dir)
         assert "Replacing patch target:" in result.stderr
         assert "Refusing unsafe PATCH_TARGET_DIR" not in result.stderr
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
+
+
+def test_apply_patches_fetches_resolved_commit_not_reachable_from_source_head(tmp_path):
+    origin_dir = tmp_path / "origin"
+    source_dir = tmp_path / "source"
+    subprocess.run(["git", "init", "--initial-branch=master", str(origin_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "virtualAxe test"], cwd=origin_dir, check=True)
+    subprocess.run(["git", "config", "user.email", "virtualaxe-test@example.invalid"], cwd=origin_dir, check=True)
+    fixture = origin_dir / "README.md"
+    fixture.write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=origin_dir, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=origin_dir, check=True, capture_output=True)
+    base_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=origin_dir, text=True, check=True, capture_output=True
+    ).stdout.strip()
+    fixture.write_text("head\n", encoding="utf-8")
+    subprocess.run(["git", "commit", "-am", "head"], cwd=origin_dir, check=True, capture_output=True)
+    head_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=origin_dir, text=True, check=True, capture_output=True
+    ).stdout.strip()
+
+    subprocess.run(["git", "clone", str(origin_dir), str(source_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "checkout", "--detach", base_commit], cwd=source_dir, check=True, capture_output=True)
+    patch_series_file = tmp_path / "series.txt"
+    patch_series_file.write_text("", encoding="utf-8")
+    target = Path(tempfile.gettempdir()) / f"virtualaxe-resolved-ref-test-{os.getpid()}"
+    shutil.rmtree(target, ignore_errors=True)
+    try:
+        result = run_apply_patches_guard(
+            str(target),
+            source_dir,
+            upstream_ref=head_commit,
+            patch_series_file=patch_series_file,
+        )
+        assert result.returncode == 0, result.stderr
+        checked_out = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=target, text=True, check=True, capture_output=True
+        ).stdout.strip()
+        assert checked_out == head_commit
     finally:
         shutil.rmtree(target, ignore_errors=True)

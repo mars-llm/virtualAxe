@@ -1,4 +1,4 @@
-From 87dc3cf3b6f8bc64fa35cc99529e996b95ff94ac Mon Sep 17 00:00:00 2001
+From 3c591a1803f27327f97837e6be02c49e4cd35c73 Mon Sep 17 00:00:00 2001
 From: virtualAxe <virtualaxe@example.invalid>
 Date: Wed, 6 May 2026 12:37:20 +0200
 Subject: [PATCH 05/13] virtual gamma: apply profile metadata and sensors
@@ -12,12 +12,11 @@ and thermal readings.
 Verify: run API system-info tests, browser/dashboard smoke, and make build.
 Removal impact: AxeOS and API consumers no longer see a Gamma-shaped virtual
 device with stable telemetry.
-
 ---
  components/asic/include/virtual_asic.h | 10 ++++
  components/asic/virtual_asic.c         | 21 +++++++++
  main/device_config.c                   | 48 ++++++++-----------
- main/http_server/http_server.c         | 19 ++++++++
+ main/http_server/system_api_json.c     | 19 ++++++++
  main/thermal/thermal.c                 | 65 ++++++++++++++++++++++----
  5 files changed, 125 insertions(+), 38 deletions(-)
 
@@ -181,21 +180,21 @@ index 7cc1f7c..e400365 100644
      free(board_version);
      free(device_model);
      free(asic_model);
-diff --git a/main/http_server/http_server.c b/main/http_server/http_server.c
-index acf0659..0937ff5 100644
---- a/main/http_server/http_server.c
-+++ b/main/http_server/http_server.c
-@@ -971,6 +971,9 @@ static esp_err_t GET_system_info(httpd_req_t * req)
-     }
+diff --git a/main/http_server/system_api_json.c b/main/http_server/system_api_json.c
+index 42ea19b..ddcdf58 100644
+--- a/main/http_server/system_api_json.c
++++ b/main/http_server/system_api_json.c
+@@ -115,6 +115,9 @@ static void system_api_add_config(cJSON *root, GlobalState *g) {
+     cJSON_AddStringToObject(root, "boardVersion", g->DEVICE_CONFIG.board_version ? g->DEVICE_CONFIG.board_version : "Unknown");
  
-     cJSON_AddNumberToObject(root, "uptimeSeconds", (esp_timer_get_time() - GLOBAL_STATE->SYSTEM_MODULE.start_time) / 1000000);
-+    cJSON_AddStringToObject(root, "deviceModel", GLOBAL_STATE->DEVICE_CONFIG.family.name);
-+    cJSON_AddNumberToObject(root, "asicCount", GLOBAL_STATE->DEVICE_CONFIG.family.asic_count);
-+    cJSON_AddNumberToObject(root, "hashDomains", GLOBAL_STATE->DEVICE_CONFIG.family.asic.hash_domains);
-     cJSON_AddNumberToObject(root, "smallCoreCount", GLOBAL_STATE->DEVICE_CONFIG.family.asic.small_core_count);
-     cJSON_AddStringToObject(root, "ASICModel", GLOBAL_STATE->DEVICE_CONFIG.family.asic.name);
-     cJSON_AddStringToObject(root, "stratumURL", stratumURL);
-@@ -1004,8 +1007,24 @@ static esp_err_t GET_system_info(httpd_req_t * req)
+     // Hardware Details
++    cJSON_AddStringToObject(root, "deviceModel", g->DEVICE_CONFIG.family.name);
++    cJSON_AddNumberToObject(root, "asicCount", g->DEVICE_CONFIG.family.asic_count);
++    cJSON_AddNumberToObject(root, "hashDomains", g->DEVICE_CONFIG.family.asic.hash_domains);
+     cJSON_AddNumberToObject(root, "maxPower", g->DEVICE_CONFIG.family.max_power);
+     cJSON_AddNumberToObject(root, "nominalVoltage", g->DEVICE_CONFIG.family.nominal_voltage);
+     cJSON_AddNumberToObject(root, "smallCoreCount", g->DEVICE_CONFIG.family.asic.small_core_count);
+@@ -155,8 +158,24 @@ static void system_api_add_config(cJSON *root, GlobalState *g) {
      cJSON_AddStringToObject(root, "networkType", connect_get_network_type());
  #ifdef CONFIG_BITAXE_VIRTUAL
      cJSON_AddStringToObject(root, "virtualAsicMode", VIRTUAL_ASIC_mode_string());
@@ -219,7 +218,7 @@ index acf0659..0937ff5 100644
 +    cJSON_AddItemToObject(root, "virtualAsicWorkers", cJSON_CreateArray());
  #endif
  
-     cJSON_AddStringToObject(root, "idfVersion", esp_get_idf_version());
+     // Pool Configuration
 diff --git a/main/thermal/thermal.c b/main/thermal/thermal.c
 index 0d1db41..d866c52 100644
 --- a/main/thermal/thermal.c
@@ -336,3 +335,4 @@ index 0d1db41..d866c52 100644
      if (!GLOBAL_STATE->ASIC_initalized) {
 -- 
 2.50.1 (Apple Git-155)
+

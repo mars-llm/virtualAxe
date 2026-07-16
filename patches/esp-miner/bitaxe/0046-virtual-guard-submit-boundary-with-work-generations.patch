@@ -1,4 +1,4 @@
-From df969be3632dd30d5f7a5470032adb6e8c88fa06 Mon Sep 17 00:00:00 2001
+From 96d15a2ad7ace0d93099cef7db94a14ad6a4e39d Mon Sep 17 00:00:00 2001
 From: virtualAxe <virtualaxe@example.invalid>
 Date: Wed, 6 May 2026 12:37:21 +0200
 Subject: [PATCH 11/13] virtual: guard submit boundary with work generations
@@ -12,23 +12,22 @@ clean-job handling, and mining tests.
 Verify: run verify-test-ci, make verify-submit-replay, and remote-pool smoke.
 Removal impact: stale virtual shares can reach submit handling after the pool has
 invalidated the work.
-
 ---
  components/asic/include/asic_common.h  |   1 +
  components/asic/include/virtual_asic.h |   3 +
  components/asic/virtual_asic.c         | 177 +++++++++++++++++++------
  components/stratum/include/mining.h    |   1 +
  components/stratum/test/test_mining.c  |  89 +++++++++++++
- main/tasks/asic_result_task.c          |  21 +++
+ main/tasks/asic_result_task.c          |  30 ++++-
  main/tasks/create_jobs_task.c          |  18 ---
- main/tasks/stratum_task.c              |   6 +-
- 8 files changed, 255 insertions(+), 61 deletions(-)
+ main/tasks/stratum_v1_task.c           |   6 +-
+ 8 files changed, 263 insertions(+), 62 deletions(-)
 
 diff --git a/components/asic/include/asic_common.h b/components/asic/include/asic_common.h
-index 6e5b298..7651c6c 100644
+index c8871de..229b8bb 100644
 --- a/components/asic/include/asic_common.h
 +++ b/components/asic/include/asic_common.h
-@@ -22,6 +22,7 @@ typedef struct
+@@ -24,6 +24,7 @@ typedef struct
  {
      // -- job result response
      uint8_t job_id;
@@ -306,7 +305,7 @@ index eb84b63..6603074 100644
      if (GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[next_job_id] != NULL) {
          free_bm_job(GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[next_job_id]);
 diff --git a/components/stratum/include/mining.h b/components/stratum/include/mining.h
-index e493bf3..24da42a 100644
+index 0fa3d63..a951d6f 100644
 --- a/components/stratum/include/mining.h
 +++ b/components/stratum/include/mining.h
 @@ -12,6 +12,7 @@ typedef struct
@@ -425,21 +424,31 @@ index e785711..209b86c 100644
  {
      mining_notify notify_message;
 diff --git a/main/tasks/asic_result_task.c b/main/tasks/asic_result_task.c
-index 418b386..bc1fe79 100644
+index 68f916e..ef81691 100644
 --- a/main/tasks/asic_result_task.c
 +++ b/main/tasks/asic_result_task.c
-@@ -52,9 +52,30 @@ void ASIC_result_task(void *pvParameters)
+@@ -59,7 +59,17 @@ void ASIC_result_task(void *pvParameters)
              ESP_LOGW(TAG, "Invalid job nonce found, 0x%02X", job_id);
              continue;
          }
-+        if (asic_result->job_generation_id != 0 && asic_result->job_generation_id != active_job->generation_id)
+-        bm_job active_job_snapshot = *GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[job_id];
++        bm_job *shared_active_job = GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[job_id];
++        uint32_t active_generation = shared_active_job->generation_id;
++        if (asic_result->job_generation_id != 0 &&
++            asic_result->job_generation_id != active_generation)
 +        {
++            pthread_mutex_unlock(&GLOBAL_STATE->valid_jobs_lock);
 +            ESP_LOGW(TAG, "Stale job generation found, 0x%02X result %" PRIu32 " active %" PRIu32,
-+                     job_id, asic_result->job_generation_id, active_job->generation_id);
++                     job_id, asic_result->job_generation_id, active_generation);
 +            continue;
 +        }
-         // check the nonce difficulty
-         double nonce_diff = test_nonce_value(active_job, asic_result->nonce, asic_result->rolled_version);
++        bm_job active_job_snapshot = *shared_active_job;
+         active_job_snapshot.jobid = active_job_snapshot.jobid ? strdup(active_job_snapshot.jobid) : NULL;
+         active_job_snapshot.extranonce2 = active_job_snapshot.extranonce2 ? strdup(active_job_snapshot.extranonce2) : NULL;
+         pthread_mutex_unlock(&GLOBAL_STATE->valid_jobs_lock);
+@@ -74,6 +84,24 @@ void ASIC_result_task(void *pvParameters)
+             continue;
+         }
  
 +#ifdef CONFIG_BITAXE_VIRTUAL
 +        pthread_mutex_lock(&GLOBAL_STATE->valid_jobs_lock);
@@ -448,30 +457,33 @@ index 418b386..bc1fe79 100644
 +        uint32_t current_generation = current_job != NULL ? current_job->generation_id : 0;
 +        pthread_mutex_unlock(&GLOBAL_STATE->valid_jobs_lock);
 +
-+        if (!still_valid || current_job != active_job ||
-+            (asic_result->job_generation_id != 0 && asic_result->job_generation_id != current_generation))
++        if (!still_valid || current_generation != active_job->generation_id ||
++            (asic_result->job_generation_id != 0 &&
++             asic_result->job_generation_id != current_generation))
 +        {
 +            ESP_LOGW(TAG, "Stale job invalidated before submit, 0x%02X", job_id);
++            free(active_job->jobid);
++            free(active_job->extranonce2);
 +            continue;
 +        }
 +#endif
 +
-         if (GLOBAL_STATE->SELF_TEST_MODULE.is_active) continue;
- 
          uint32_t version_bits = asic_result->rolled_version ^ active_job->version;
+         if (nonce_diff >= active_job->pool_diff)
+         {
 diff --git a/main/tasks/create_jobs_task.c b/main/tasks/create_jobs_task.c
-index 71eb0b4..1efc7f5 100644
+index 0cf059f..1b00e33 100644
 --- a/main/tasks/create_jobs_task.c
 +++ b/main/tasks/create_jobs_task.c
-@@ -20,7 +20,6 @@ static const char *TAG = "create_jobs_task";
- 
- static void generate_work(GlobalState *GLOBAL_STATE, mining_notify *notification, uint64_t extranonce_2, double difficulty);
+@@ -26,7 +26,6 @@ static void generate_work(GlobalState *GLOBAL_STATE, mining_notify *notification
+ static void generate_work_sv2(GlobalState *GLOBAL_STATE, sv2_job_t *job, double difficulty);
+ static void generate_work_sv2_ext(GlobalState *GLOBAL_STATE, sv2_ext_job_t *job, double difficulty, uint64_t extranonce_2_counter);
  static bool use_periodic_work_refresh(const GlobalState *GLOBAL_STATE);
 -static void update_virtual_active_job_difficulty(GlobalState *GLOBAL_STATE, double difficulty);
  
- void create_jobs_task(void *pvParameters)
- {
-@@ -91,7 +90,6 @@ void create_jobs_task(void *pvParameters)
+ // Free a work item using the correct free function for the protocol it was created under
+ static void free_work_item(GlobalState *GLOBAL_STATE, void *work, stratum_protocol_t protocol)
+@@ -165,7 +164,6 @@ void create_jobs_task(void *pvParameters)
                  if (GLOBAL_STATE->new_set_mining_difficulty_msg) {
                      ESP_LOGI(TAG, "New pool difficulty %.2f", GLOBAL_STATE->pool_difficulty);
                      difficulty = GLOBAL_STATE->pool_difficulty;
@@ -479,7 +491,7 @@ index 71eb0b4..1efc7f5 100644
                      GLOBAL_STATE->new_set_mining_difficulty_msg = false;
                      should_generate_work = true;
                  }
-@@ -120,22 +118,6 @@ static bool use_periodic_work_refresh(const GlobalState *GLOBAL_STATE)
+@@ -221,22 +219,6 @@ static bool use_periodic_work_refresh(const GlobalState *GLOBAL_STATE)
      return GLOBAL_STATE->DEVICE_CONFIG.family.asic.id != ASIC_VIRTUAL;
  }
  
@@ -502,11 +514,11 @@ index 71eb0b4..1efc7f5 100644
  static void generate_work(GlobalState *GLOBAL_STATE, mining_notify *notification, uint64_t extranonce_2, double difficulty)
  {
      if (GLOBAL_STATE->extranonce_2_len > MAX_EXTRANONCE2_LEN) {
-diff --git a/main/tasks/stratum_task.c b/main/tasks/stratum_task.c
-index c2ace66..576d1cd 100644
---- a/main/tasks/stratum_task.c
-+++ b/main/tasks/stratum_task.c
-@@ -605,7 +605,11 @@ void stratum_task(void * pvParameters)
+diff --git a/main/tasks/stratum_v1_task.c b/main/tasks/stratum_v1_task.c
+index fea52af..85ee211 100644
+--- a/main/tasks/stratum_v1_task.c
++++ b/main/tasks/stratum_v1_task.c
+@@ -332,7 +332,11 @@ void stratum_v1_task(void *pvParameters)
                  GLOBAL_STATE->SYSTEM_MODULE.work_received++;
                  SYSTEM_notify_new_ntime(GLOBAL_STATE, stratum_api_v1_message.mining_notification->ntime);
                  if (stratum_api_v1_message.mining_notification->clean_jobs &&
@@ -516,8 +528,9 @@ index c2ace66..576d1cd 100644
 +                     || GLOBAL_STATE->DEVICE_CONFIG.family.asic.id == ASIC_VIRTUAL
 +#endif
 +                    )) {
-                     cleanQueue(GLOBAL_STATE);
+                     SYSTEM_clean_jobs_queue(GLOBAL_STATE);
                  }
                  if (GLOBAL_STATE->stratum_queue.count == QUEUE_SIZE) {
 -- 
 2.50.1 (Apple Git-155)
+

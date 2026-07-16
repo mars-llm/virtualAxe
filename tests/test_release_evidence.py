@@ -100,8 +100,9 @@ def test_release_evidence_report_records_live_gate_and_patch_provenance(tmp_path
 
     assert report["releaseBlockers"] == []
     assert report["source"]["name"] == "bitaxe"
-    assert report["source"]["configuredResolvedCommit"] == "ce44b2bbfef60ef8830ab17b321cc295e0c0edc8"
-    assert report["source"]["resolvedCommit"] == "ce44b2bbfef60ef8830ab17b321cc295e0c0edc8"
+    assert report["source"]["configuredResolvedCommit"] == "64680f8a4da0b9a3b532051f0aa18429fcf04e82"
+    assert report["source"]["resolvedCommit"] == "64680f8a4da0b9a3b532051f0aa18429fcf04e82"
+    assert report["source"]["releaseTag"] == "v2.14.2"
     assert report["source"]["patchSeries"] == "patches/esp-miner/bitaxe/series.txt"
     assert report["patchStack"]["patchSeries"] == "patches/esp-miner/bitaxe/series.txt"
     assert report["patchStack"]["patchCount"] == 13

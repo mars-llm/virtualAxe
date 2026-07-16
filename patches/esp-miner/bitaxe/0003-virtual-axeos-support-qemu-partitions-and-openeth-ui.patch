@@ -1,4 +1,4 @@
-From bddaad5ff211aa9b5721a445c7906455e395deec Mon Sep 17 00:00:00 2001
+From 1ddeaf296b089fea1a6f646cb02a8e0f8b92ab94 Mon Sep 17 00:00:00 2001
 From: virtualAxe <virtualaxe@example.invalid>
 Date: Wed, 6 May 2026 12:37:20 +0200
 Subject: [PATCH 03/13] virtual axeos: support qemu partitions and openeth ui
@@ -12,18 +12,17 @@ handling, and the AxeOS network-edit component.
 Verify: run make build, API settings tests, and browser smoke tests.
 Removal impact: virtual firmware partition lookup and local AxeOS networking
 flows can fail or mislead users.
-
 ---
  main/CMakeLists.txt                           |  12 +
  .../network-edit/network.edit.component.html  |  13 +-
- .../network-edit/network.edit.component.ts    |  41 ++-
+ .../network-edit/network.edit.component.ts    |  40 ++-
  main/http_server/http_server.c                |  19 +-
  main/virtual_partitions.c                     | 304 ++++++++++++++++++
- 5 files changed, 370 insertions(+), 19 deletions(-)
+ 5 files changed, 369 insertions(+), 19 deletions(-)
  create mode 100644 main/virtual_partitions.c
 
 diff --git a/main/CMakeLists.txt b/main/CMakeLists.txt
-index 76f1ade..a5b9ad8 100755
+index 89af2ed..e6bae17 100755
 --- a/main/CMakeLists.txt
 +++ b/main/CMakeLists.txt
 @@ -20,6 +20,7 @@ SRCS
@@ -33,8 +32,8 @@ index 76f1ade..a5b9ad8 100755
 +    "virtual_partitions.c"
      "./http_server/http_server.c"
      "./http_server/websocket.c"
-     "./http_server/theme_api.c"
-@@ -83,6 +84,17 @@ PRIV_REQUIRES
+     "./http_server/websocket_log.c"
+@@ -90,6 +91,17 @@ PRIV_REQUIRES
  EMBED_FILES "http_server/recovery_page.html"
  )
  
@@ -53,7 +52,7 @@ index 76f1ade..a5b9ad8 100755
  idf_build_set_property(COMPILE_OPTIONS "-DLV_CONF_PATH=\"${CMAKE_SOURCE_DIR}/main/lv_conf.h\"" APPEND)
  
 diff --git a/main/http_server/axe-os/src/app/components/network-edit/network.edit.component.html b/main/http_server/axe-os/src/app/components/network-edit/network.edit.component.html
-index ac9ffc6..0e5e100 100644
+index ac9ffc6..4142f08 100644
 --- a/main/http_server/axe-os/src/app/components/network-edit/network.edit.component.html
 +++ b/main/http_server/axe-os/src/app/components/network-edit/network.edit.component.html
 @@ -1,5 +1,12 @@
@@ -90,10 +89,10 @@ index ac9ffc6..0e5e100 100644
              <div class="col-12 md:col-10 p-input-icon-right">
                  <i *ngIf="form.get('wifiPass')?.dirty" class="pi cursor-pointer"
 diff --git a/main/http_server/axe-os/src/app/components/network-edit/network.edit.component.ts b/main/http_server/axe-os/src/app/components/network-edit/network.edit.component.ts
-index b6fbdc3..7eb442c 100644
+index c0c13ab..2d3dc48 100644
 --- a/main/http_server/axe-os/src/app/components/network-edit/network.edit.component.ts
 +++ b/main/http_server/axe-os/src/app/components/network-edit/network.edit.component.ts
-@@ -21,6 +21,7 @@ export class NetworkEditComponent implements OnInit {
+@@ -23,6 +23,7 @@ export class NetworkEditComponent implements OnInit {
    public form!: FormGroup;
    public savedChanges: boolean = false;
    public scanning: boolean = false;
@@ -101,11 +100,10 @@ index b6fbdc3..7eb442c 100644
  
    @Input() uri = '';
  
-@@ -38,11 +39,20 @@ export class NetworkEditComponent implements OnInit {
-     this.systemService.getInfo(this.uri)
-       .pipe(this.loadingService.lockUIUntilComplete())
+@@ -41,11 +42,19 @@ export class NetworkEditComponent implements OnInit {
+     this.liveDataService.info$
+       .pipe(first(), this.loadingService.lockUIUntilComplete())
        .subscribe(info => {
-+        // Detect the virtual Gamma network backend from runtime system info.
 +        const runtimeInfo = info as typeof info & { networkType?: string };
 +        this.usesHostNetwork = runtimeInfo.networkType?.toLowerCase() === 'openeth';
          this.form = this.fb.group({
@@ -123,8 +121,8 @@ index b6fbdc3..7eb442c 100644
          this.formSubject.next(this.form);
        });
    }
-@@ -52,16 +62,21 @@ export class NetworkEditComponent implements OnInit {
- 
+@@ -57,16 +66,21 @@ export class NetworkEditComponent implements OnInit {
+     const restartRequired = this.isRestartRequired;
      const form = this.form.getRawValue();
  
 -    // Allow an empty Wi-Fi password
@@ -154,7 +152,7 @@ index b6fbdc3..7eb442c 100644
      }
  
      this.systemService.updateSystem(this.uri, form)
-@@ -85,6 +100,10 @@ export class NetworkEditComponent implements OnInit {
+@@ -93,6 +107,10 @@ export class NetworkEditComponent implements OnInit {
    }
  
    public scanWifi() {
@@ -165,7 +163,7 @@ index b6fbdc3..7eb442c 100644
      this.scanning = true;
      this.http.get<{networks: WifiNetwork[]}>('/api/system/wifi/scan')
        .pipe(
-@@ -132,7 +151,7 @@ export class NetworkEditComponent implements OnInit {
+@@ -140,7 +158,7 @@ export class NetworkEditComponent implements OnInit {
    }
  
    public restart() {
@@ -175,10 +173,10 @@ index b6fbdc3..7eb442c 100644
        .subscribe({
          next: () => {
 diff --git a/main/http_server/http_server.c b/main/http_server/http_server.c
-index b4595a1..acf0659 100644
+index fec071b..d97e121 100644
 --- a/main/http_server/http_server.c
 +++ b/main/http_server/http_server.c
-@@ -254,6 +254,11 @@ static esp_err_t ip_in_private_range(uint32_t address) {
+@@ -239,6 +239,11 @@ static esp_err_t ip_in_private_range(uint32_t address) {
          return ESP_OK;
      }
  
@@ -190,7 +188,7 @@ index b4595a1..acf0659 100644
      return ESP_FAIL;
  }
  
-@@ -262,14 +267,16 @@ static uint32_t extract_origin_ip_addr(char *origin)
+@@ -247,14 +252,16 @@ static uint32_t extract_origin_ip_addr(char *origin)
      char ip_str[16];
      uint32_t origin_ip_addr = 0;
  
@@ -525,3 +523,4 @@ index 0000000..b83d84a
 +#endif
 -- 
 2.50.1 (Apple Git-155)
+

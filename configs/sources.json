@@ -7,11 +7,13 @@
     "bitaxe": {
       "displayName": "Bitaxe ESP-Miner",
       "repoUrl": "https://github.com/bitaxeorg/ESP-Miner",
-      "ref": "ce44b2bbfef60ef8830ab17b321cc295e0c0edc8",
-      "resolvedCommit": "ce44b2bbfef60ef8830ab17b321cc295e0c0edc8",
+      "ref": "64680f8a4da0b9a3b532051f0aa18429fcf04e82",
+      "resolvedCommit": "64680f8a4da0b9a3b532051f0aa18429fcf04e82",
+      "releaseTag": "v2.14.2",
       "patchSeries": "patches/esp-miner/bitaxe/series.txt",
       "nvsTemplate": "configs/nvs/config-virtual.csv",
       "profile": "gamma",
+      "initSubmodules": true,
       "supportState": "live_verified",
       "supportStatus": "default firmware source; deterministic gates and live pool accepted-share evidence verified"
     },

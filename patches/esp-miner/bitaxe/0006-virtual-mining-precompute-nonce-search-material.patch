@@ -1,4 +1,4 @@
-From 4901cd485955e6985c42025ff9d24acbe6c8a6a4 Mon Sep 17 00:00:00 2001
+From aff743505733d809094e4232ed69efef0c26fd8e Mon Sep 17 00:00:00 2001
 From: virtualAxe <virtualaxe@example.invalid>
 Date: Wed, 6 May 2026 12:37:21 +0200
 Subject: [PATCH 06/13] virtual mining: precompute nonce search material
@@ -11,7 +11,6 @@ candidate diff calculation.
 Verify: run make verify-submit-replay and verify-test-ci.
 Removal impact: low-difficulty guest mining becomes too slow for reliable local
 and remote submit evidence.
-
 ---
  components/asic/virtual_asic.c | 166 +++++++++++++++++++++++++++++++--
  1 file changed, 157 insertions(+), 9 deletions(-)
@@ -234,3 +233,4 @@ index 9822dfa..421b44a 100644
          if (i + 1 < version_count) {
 -- 
 2.50.1 (Apple Git-155)
+

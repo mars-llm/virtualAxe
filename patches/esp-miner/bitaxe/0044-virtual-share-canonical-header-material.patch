@@ -1,4 +1,4 @@
-From cce8b302e2680ff2593114c3bf3bfacf880f5e19 Mon Sep 17 00:00:00 2001
+From 89e4ce8c09b7bb6b98625f8011956aa6532eb3aa Mon Sep 17 00:00:00 2001
 From: virtualAxe <virtualaxe@example.invalid>
 Date: Wed, 6 May 2026 12:37:21 +0200
 Subject: [PATCH 09/13] virtual: share canonical header material
@@ -11,7 +11,6 @@ Upstream surface: mining header helpers, virtual ASIC cache setup, and mining
 unit tests.
 Verify: run verify-test-ci and make verify-submit-replay.
 Removal impact: guest search and validator can diverge on header construction.
-
 ---
  components/asic/virtual_asic.c        | 76 ++++++++++++---------------
  components/stratum/include/mining.h   | 14 ++++-
@@ -178,7 +177,7 @@ index 3123c8b..90a084b 100644
  
          if (i + 1 < version_count) {
 diff --git a/components/stratum/include/mining.h b/components/stratum/include/mining.h
-index d07543c..e493bf3 100644
+index ee928cc..0fa3d63 100644
 --- a/components/stratum/include/mining.h
 +++ b/components/stratum/include/mining.h
 @@ -23,6 +23,14 @@ typedef struct
@@ -196,7 +195,7 @@ index d07543c..e493bf3 100644
  void free_bm_job(bm_job *job);
  
  void calculate_coinbase_tx_hash(const char *coinbase_1, const char *coinbase_2,
-@@ -32,10 +40,14 @@ void calculate_merkle_root_hash(const uint8_t coinbase_tx_hash[32], const uint8_
+@@ -38,10 +46,14 @@ void calculate_merkle_root_hash(const uint8_t coinbase_tx_hash[32], const uint8_
  
  void construct_bm_job(mining_notify *params, const uint8_t merkle_root[32], const uint32_t version_mask, const double difficulty, bm_job* new_job);
  
@@ -214,7 +213,7 @@ index d07543c..e493bf3 100644
 \ No newline at end of file
 +#endif /* MINING_H_ */
 diff --git a/components/stratum/mining.c b/components/stratum/mining.c
-index e09fcd2..03ebf67 100644
+index 60d4447..49906c8 100644
 --- a/components/stratum/mining.c
 +++ b/components/stratum/mining.c
 @@ -6,6 +6,19 @@
@@ -237,10 +236,10 @@ index e09fcd2..03ebf67 100644
  void free_bm_job(bm_job *job)
  {
      free(job->jobid);
-@@ -116,27 +129,45 @@ void extranonce_2_generate(uint64_t extranonce_2, uint32_t length, char dest[sta
-  */
- static const double truediffone = 26959535291011309493156476344723991336010898738574164086137773096960.0;
+@@ -132,27 +145,45 @@ void extranonce_2_generate(uint64_t extranonce_2, uint32_t length, char dest[sta
+ }
  
+ ///////cgminer nonce testing
 +void bm_job_build_header80(const bm_job *job, const uint32_t rolled_version, const uint32_t nonce, uint8_t out_header[static BTC_HEADER_SIZE])
 +{
 +    memcpy(out_header, &rolled_version, sizeof(rolled_version));
@@ -361,3 +360,4 @@ index 8a87489..d9ca91c 100644
 +}
 -- 
 2.50.1 (Apple Git-155)
+

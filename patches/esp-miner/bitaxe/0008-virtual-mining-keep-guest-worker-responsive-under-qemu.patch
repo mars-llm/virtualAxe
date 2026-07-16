@@ -1,4 +1,4 @@
-From 009fa2ebbc46b1ef3657ad8c900ba1a5bfa1ddbf Mon Sep 17 00:00:00 2001
+From 8434387f2bac52968d9edf7a1b72632ae18787ff Mon Sep 17 00:00:00 2001
 From: virtualAxe <virtualaxe@example.invalid>
 Date: Wed, 6 May 2026 12:37:21 +0200
 Subject: [PATCH 08/13] virtual mining: keep guest worker responsive under qemu
@@ -10,7 +10,6 @@ Upstream surface: virtual ASIC yield interval, task creation, and worker logs.
 Verify: run make verify-submit-replay and API responsiveness tests.
 Removal impact: QEMU scheduling can delay settings, API, or pool processing
 during active guest-side mining.
-
 ---
  components/asic/virtual_asic.c | 17 ++++++++++-------
  1 file changed, 10 insertions(+), 7 deletions(-)
@@ -77,3 +76,4 @@ index 421b44a..3123c8b 100644
      taskENTER_CRITICAL(&hash_counter_lock);
 -- 
 2.50.1 (Apple Git-155)
+

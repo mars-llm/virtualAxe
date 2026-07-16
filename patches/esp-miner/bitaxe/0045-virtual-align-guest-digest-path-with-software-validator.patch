@@ -1,4 +1,4 @@
-From 63ac2cab60b7656f6d1a5a67653dbee2c2386b5a Mon Sep 17 00:00:00 2001
+From 4446222355f5d768c70b7fe4e6e1dae531f335f4 Mon Sep 17 00:00:00 2001
 From: virtualAxe <virtualaxe@example.invalid>
 Date: Wed, 6 May 2026 12:37:21 +0200
 Subject: [PATCH 10/13] virtual: align digest path with validator
@@ -11,7 +11,6 @@ Upstream surface: virtual ASIC digest calculation and mining unit tests.
 Verify: run verify-test-ci and make verify-submit-replay.
 Removal impact: valid guest nonces can be rejected or invalid candidates can be
 submitted.
-
 ---
  components/asic/virtual_asic.c        | 15 ++++--
  components/stratum/test/test_mining.c | 67 +++++++++++++++++++++++++++
@@ -137,3 +136,4 @@ index d9ca91c..e785711 100644
      mining_notify notify_message;
 -- 
 2.50.1 (Apple Git-155)
+

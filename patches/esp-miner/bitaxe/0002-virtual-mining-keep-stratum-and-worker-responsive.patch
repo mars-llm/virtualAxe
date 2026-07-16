@@ -1,4 +1,4 @@
-From 716d25153ce5fc116ff2c134dfcb172e140a7cc0 Mon Sep 17 00:00:00 2001
+From a8193abb8f2ffb99d36e90eee5ddb05efe3233c8 Mon Sep 17 00:00:00 2001
 From: virtualAxe <virtualaxe@example.invalid>
 Date: Wed, 6 May 2026 12:37:20 +0200
 Subject: [PATCH 02/13] virtual mining: keep stratum and worker responsive
@@ -11,7 +11,6 @@ checks.
 Verify: run make verify-submit-replay and verify-test-ci.
 Removal impact: stale work can occupy the virtual worker long enough to harm
 Stratum responsiveness and accepted-share timing.
-
 ---
  components/asic/virtual_asic.c | 18 +++++++++++++++---
  1 file changed, 15 insertions(+), 3 deletions(-)
@@ -70,3 +69,4 @@ index ef10ade..c0d9069 100644
      hash_attempt_counter = 0;
 -- 
 2.50.1 (Apple Git-155)
+

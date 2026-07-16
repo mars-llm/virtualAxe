@@ -371,7 +371,7 @@ def test_public_source_docs_match_current_schema():
     assert default_source == "bitaxe"
     assert (
         "| `bitaxe` | [bitaxeorg/ESP-Miner](https://github.com/bitaxeorg/ESP-Miner) | "
-        f"`{bitaxe['ref']}` | `{profile['id']}` |"
+        f"`{bitaxe['releaseTag']}` / `{bitaxe['resolvedCommit']}` | `{profile['id']}` |"
     ) in readme
     assert (
         "| `nerdnos` | "
