@@ -160,6 +160,27 @@ def test_patch_bodies_explain_release_boundary_and_verification():
             assert label in body, f"{filename} missing {label}"
 
 
+def test_low_difficulty_patch_rationales_match_release_pool_policy():
+    bitaxe = patch_body(
+        BITAXE_PATCH_DIR / "0048-virtual-pool-support-low-difficulty-interoperability.patch"
+    )
+    nerdnos = patch_body(
+        PATCH_DIR / "nerdnos" / "0004-nerdnos-low-difficulty-pool-interoperability.patch"
+    )
+    nerdnos_search = patch_body(
+        PATCH_DIR / "nerdnos" / "0005-nerdnos-precompute-virtual-nonce-search-material.patch"
+    )
+
+    normalized_bodies = [" ".join(body.split()) for body in (bitaxe, nerdnos, nerdnos_search)]
+    for body in normalized_bodies[:2]:
+        assert "Bitronics and Nerdminers release gate" in body
+        assert "PublicPool remains an optional interoperability target" in body
+    for body in normalized_bodies:
+        assert "PublicPool and Nerdminers smoke" not in body
+        assert "PublicPool and Bitronics" not in body
+        assert "required by PublicPool" not in body
+
+
 def test_patch_stack_documents_one_keep_reason_per_patch():
     text = (ROOT_DIR / "docs" / "patch-stack.md").read_text(encoding="utf-8")
 

@@ -3,10 +3,11 @@ From: virtualAxe <virtualaxe@example.invalid>
 Date: Mon, 11 May 2026 14:59:24 +0200
 Subject: [PATCH] nerdnos: support virtual low difficulty pools
 
-Why: NerdNos virtual live smoke must interoperate with the same low-difficulty
-PublicPool, Bitronics, and Nerdminers pools used by the Bitaxe source. The
-upstream NerdNos difficulty path stores the suggested difficulty as an integer
-and truncates assigned fractional pool difficulty to zero in the system API.
+Why: NerdNos virtual live smoke must interoperate with the low-difficulty
+Bitronics and Nerdminers release gate. PublicPool remains an optional
+interoperability target. The upstream NerdNos difficulty path stores the
+suggested difficulty as an integer and truncates assigned fractional pool
+difficulty to zero in the system API.
 It also reads suggested difficulty outside the source-native per-pool Stratum
 configuration snapshot, so virtual live phases can send a stale integer
 suggestion after a fractional difficulty was seeded. Its virtual board
@@ -26,9 +27,10 @@ optional setup response ID reservation, and the V1 job validity guard.
 Verify: SOURCE=nerdnos make patch-check, SOURCE=nerdnos make verify-submit-replay,
 and make verify-release SOURCE=nerdnos.
 
-Removal impact: PublicPool and Bitronics can keep assigning high difficulty
-during smoke, Nerdminer-compatible pools reject the subscribe identity, and a
-notify without an established extranonce can panic the NerdNos job builder.
+Removal impact: supported low-difficulty pools can keep assigning impractical
+difficulty during smoke, Nerdminer-compatible pools reject the subscribe
+identity, and a notify without an established extranonce can panic the NerdNos
+job builder.
 Pools that accept the first submitted share can have that response classified
 as setup, leaving firmware/API accepted counters unchanged.
 

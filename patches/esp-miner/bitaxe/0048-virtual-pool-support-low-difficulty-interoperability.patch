@@ -3,16 +3,16 @@ From: virtualAxe <virtualaxe@example.invalid>
 Date: Wed, 6 May 2026 12:37:21 +0200
 Subject: [PATCH 13/13] virtual pool: support low-difficulty interoperability
 
-Why: support low-difficulty pool interoperability required by PublicPool,
-Bitronics, and Nerdminers verification.
+Why: support the low-difficulty interoperability required by the Bitronics and
+Nerdminers release gate. PublicPool remains an optional interoperability target.
 Virtual-only: subscribe-agent overrides, submit-response recovery, and timing
 adjustments are scoped to CONFIG_BITAXE_VIRTUAL; pool settings remain
 ESP-Miner-compatible API fields.
 Upstream surface: Stratum API/task behavior, NVS pool settings, HTTP system info,
 ASIC result handling, scoreboard formatting, and AxeOS difficulty display.
 Verify: run make verify-submit-replay and make verify-release.
-Removal impact: blocking pool phases can fail accepted-share evidence or report
-low-difficulty settings incorrectly.
+Removal impact: required low-difficulty pool phases can fail accepted-share
+evidence or report low-difficulty settings incorrectly.
 
 ---
  components/stratum/include/stratum_api.h      |  13 +-

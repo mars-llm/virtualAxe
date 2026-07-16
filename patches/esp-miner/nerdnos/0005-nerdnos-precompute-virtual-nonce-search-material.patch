@@ -11,7 +11,8 @@ Upstream surface: NerdNos virtual ASIC SHA cache, candidate filter, and nonce-di
 
 Verify: SOURCE=nerdnos make patch-check, SOURCE=nerdnos make verify-submit-replay, python3 scripts/virtualaxe.py verify-test-ci --source nerdnos --json, and make verify-release SOURCE=nerdnos.
 
-Removal impact: live PublicPool and Nerdminers smoke phases remain probabilistic because the virtual ASIC recomputes full header hashes for every nonce.
+Removal impact: live low-difficulty pool phases remain probabilistic because the
+virtual ASIC recomputes full header hashes for every nonce.
 ---
  components/bm1397/virtual_asic.cpp | 236 ++++++++++++++++++++++++++++-
  1 file changed, 235 insertions(+), 1 deletion(-)
