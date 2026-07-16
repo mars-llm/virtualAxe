@@ -117,6 +117,8 @@ Windows shells are not part of the tested release matrix.
 | `./vaxe` | Print usage and examples without starting QEMU. |
 | `./vaxe --source bitaxe` | Run the default Bitaxe ESP-Miner source explicitly. |
 | `./vaxe --source nerdnos` | Run the NerdNos source with the same virtual Gamma profile. |
+| `./vaxe --source bitaxe --pool bitronics` | Start Bitaxe firmware with the Bitronics preset. |
+| `./vaxe --source bitaxe --pool nerdminers` | Start Bitaxe firmware with the Nerdminers preset. |
 | `make build SOURCE=bitaxe` | Build the default reusable QEMU image without starting QEMU. |
 | `make build SOURCE=nerdnos` | Build the NerdNos reusable QEMU image without starting QEMU. |
 | `make verify-submit-replay SOURCE=bitaxe` | Deterministic local submit replay for the Bitaxe source. |
@@ -125,6 +127,24 @@ Windows shells are not part of the tested release matrix.
 
 Patch, drift, release, and cleanup commands are documented in
 [`docs/command-contract.md`](docs/command-contract.md).
+
+## Pool Presets
+
+Pool presets update the firmware's own Stratum settings; the guest firmware
+still opens the pool connection, searches nonces, and submits shares.
+
+| Preset | Endpoint | Use |
+| --- | --- | --- |
+| `bitronics` | [Bitronics](https://pool.bitronics.store/) `pool.bitronics.store:3334` | Automated live release target. |
+| `nerdminers` | [Nerdminers](https://pool.nerdminers.org/) `pool.nerdminers.org:3333` | Automated live release target. |
+| `public` | [PublicPool](https://web.public-pool.io/) `public-pool.io:3333` | Optional interoperability target; public instances are not release gates. |
+| `host:port` | Custom Stratum endpoint | Use a pool that is not built in as a preset. |
+
+For example:
+
+```sh
+./vaxe --source bitaxe --pool bitronics
+```
 
 ## Supported Sources
 

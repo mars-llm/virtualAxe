@@ -64,7 +64,7 @@ def test_vaxe_without_arguments_prints_help_without_starting(monkeypatch: pytest
     assert "usage: vaxe" in output
     assert "Start a source-specific virtualAxe operator session." in output
     assert "./vaxe --source bitaxe" in output
-    assert "./vaxe --source nerdnos --pool public" in output
+    assert "./vaxe --source nerdnos --pool bitronics" in output
     assert "Bare ./vaxe prints this help and does not start QEMU." in output
 
 
@@ -74,6 +74,7 @@ def test_vaxe_help_describes_profile_and_simulation_options():
     output = " ".join(module.build_parser().format_help().split())
 
     assert "Virtual hardware profile (gamma is the only supported profile)" in output
+    assert "Use bitronics or nerdminers; public is optional, or provide host:port" in output
     assert "Enable the loopback-only /sim/* UI controls" in output
     assert "Firmware HTTP port behind the Simulation Actions proxy" in output
 

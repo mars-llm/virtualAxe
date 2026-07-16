@@ -114,7 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Examples:\n"
             "  ./vaxe --source bitaxe\n"
-            "  ./vaxe --source nerdnos --pool public\n\n"
+            "  ./vaxe --source nerdnos --pool bitronics\n\n"
             "Bare ./vaxe prints this help and does not start QEMU."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -126,7 +126,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="gamma",
         help="Virtual hardware profile (gamma is the only supported profile)",
     )
-    parser.add_argument("--pool", type=parse_pool_target, help="Use public, bitronics, nerdminers, or host:port")
+    parser.add_argument(
+        "--pool",
+        type=parse_pool_target,
+        help="Use bitronics or nerdminers; public is optional, or provide host:port",
+    )
     parser.add_argument(
         "--sim-actions",
         action="store_true",
