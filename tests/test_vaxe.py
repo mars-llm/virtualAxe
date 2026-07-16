@@ -1152,7 +1152,7 @@ def test_virtualaxe_help_describes_each_developer_subcommand():
         "Run local QEMU API and browser integration checks.",
         "Run deterministic guest-side submit-boundary replay.",
         "Start the local operator dashboard for a virtual runtime.",
-        "Run the automated external/live three-pool release gate.",
+        "Run the automated external/live Bitronics and Nerdminers release gate.",
         "Run source-specific firmware unit or API-boot proof.",
         "Inspect, import, or delete ignored local NVS state.",
     ):

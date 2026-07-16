@@ -28,31 +28,31 @@ def write_summary(
     phases: list[dict] | None = None,
 ) -> Path:
     evidence_root = evidence_root or tmp_path
-    phases = phases or [
+    phases = phases if phases is not None else [
         {
             "phase": "01-primary",
-            "label": "PublicPool",
+            "label": "Bitronics",
             "phaseStatus": "PASSED",
-            "poolHost": "public-pool.io",
-            "poolPort": 3333,
-            "assignedPoolDifficulty": 0.0001,
+            "poolHost": "pool.bitronics.store",
+            "poolPort": 3334,
+            "assignedPoolDifficulty": 0.0005,
             "acceptedShareDelta": 1,
             "acceptedShareProofSource": "firmware_api",
             "rejectedShareDelta": 0,
             "jobsAssigned": [2],
             "phaseDurationSeconds": 4.0,
             "phaseTimeoutSeconds": 120.0,
-            "apiBeforePath": str(evidence_root / "api-before-public.json"),
-            "apiAfterPath": str(evidence_root / "api-after-public.json"),
-            "waitResultPath": str(evidence_root / "wait-result-public.json"),
-            "qemuLogPath": str(evidence_root / "qemu-public.log"),
+            "apiBeforePath": str(evidence_root / "api-before-bitronics.json"),
+            "apiAfterPath": str(evidence_root / "api-after-bitronics.json"),
+            "waitResultPath": str(evidence_root / "wait-result-bitronics.json"),
+            "qemuLogPath": str(evidence_root / "qemu-bitronics.log"),
         },
         {
             "phase": "02-secondary",
-            "label": "Bitronics",
+            "label": "Nerdminers",
             "phaseStatus": "PASSED",
-            "poolHost": "pool.bitronics.store",
-            "poolPort": 3334,
+            "poolHost": "pool.nerdminers.org",
+            "poolPort": 3333,
             "assignedPoolDifficulty": 0.0005,
             "acceptedShareDelta": 1,
             "acceptedShareProofSource": "pool_stats",
@@ -60,24 +60,8 @@ def write_summary(
             "jobsAssigned": [2],
             "phaseDurationSeconds": 8.0,
             "phaseTimeoutSeconds": 120.0,
-            "poolStatsBeforePath": str(evidence_root / "pool-stats-before-bitronics.json"),
-            "poolStatsAfterPath": str(evidence_root / "pool-stats-after-bitronics.json"),
-            "waitResultPath": str(evidence_root / "wait-result-bitronics.json"),
-            "qemuLogPath": str(evidence_root / "qemu-bitronics.log"),
-        },
-        {
-            "phase": "03-tertiary",
-            "label": "Nerdminers",
-            "phaseStatus": "PASSED",
-            "poolHost": "pool.nerdminers.org",
-            "poolPort": 3333,
-            "assignedPoolDifficulty": 0.0005,
-            "acceptedShareDelta": 1,
-            "acceptedShareProofSource": "firmware_api",
-            "rejectedShareDelta": 0,
-            "jobsAssigned": [2],
-            "phaseDurationSeconds": 12.0,
-            "phaseTimeoutSeconds": 600.0,
+            "poolStatsBeforePath": str(evidence_root / "pool-stats-before-nerdminers.json"),
+            "poolStatsAfterPath": str(evidence_root / "pool-stats-after-nerdminers.json"),
             "apiBeforePath": str(evidence_root / "api-before-nerdminers.json"),
             "apiAfterPath": str(evidence_root / "api-after-nerdminers.json"),
             "waitResultPath": str(evidence_root / "wait-result-nerdminers.json"),
@@ -91,7 +75,7 @@ def write_summary(
         "status": status,
         "poolUser": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
         "outputDir": str(evidence_root / "release-matrix" / "20260507-test"),
-        "releaseGate": {"requiredPools": ["PublicPool", "Bitronics", "Nerdminers"]},
+        "releaseGate": {"requiredPools": ["Bitronics", "Nerdminers"]},
         "profiles": [
             {
                 "profile": "gamma",
@@ -158,7 +142,7 @@ def test_release_evidence_report_uses_repo_relative_paths(tmp_path: Path):
     phase = report["liveVerification"]["phases"][0]
 
     assert report["liveVerification"]["outputDir"] == "out/release-matrix/20260507-test"
-    assert phase["evidence"]["qemuLogPath"] == "out/qemu-public.log"
+    assert phase["evidence"]["qemuLogPath"] == "out/qemu-bitronics.log"
     assert str(ROOT_DIR) not in json.dumps(report)
 
 
@@ -191,7 +175,7 @@ def test_release_evidence_report_flags_failed_live_gate(tmp_path: Path):
     assert "latest live release verifier summary is not passed" in module.markdown(report)
 
 
-def test_release_evidence_report_requires_all_blocking_pools(tmp_path: Path):
+def test_release_evidence_report_ignores_optional_publicpool_and_requires_gate_pools(tmp_path: Path):
     module = load_module()
     summary_path = write_summary(
         tmp_path,
@@ -215,6 +199,7 @@ def test_release_evidence_report_requires_all_blocking_pools(tmp_path: Path):
     assert report["releaseBlockers"] == [
         "latest live release verifier summary is missing required pool evidence: Bitronics, Nerdminers"
     ]
+    assert all("PublicPool" not in blocker for blocker in report["releaseBlockers"])
 
 
 def test_smoke_release_evidence_records_qemu_log_share_diagnostic(tmp_path: Path):
@@ -224,18 +209,6 @@ def test_smoke_release_evidence_records_qemu_log_share_diagnostic(tmp_path: Path
         phases=[
             {
                 "phase": "01-primary",
-                "label": "PublicPool",
-                "phaseStatus": "PASSED",
-                "poolHost": "public-pool.io",
-                "poolPort": 3333,
-                "assignedPoolDifficulty": 0.0001,
-                "acceptedShareDelta": 1,
-                "acceptedShareProofSource": "qemu_log",
-                "qemuAcceptedShareDelta": 1,
-                "rejectedShareDelta": 0,
-            },
-            {
-                "phase": "02-secondary",
                 "label": "Bitronics",
                 "phaseStatus": "PASSED",
                 "poolHost": "pool.bitronics.store",
@@ -247,7 +220,7 @@ def test_smoke_release_evidence_records_qemu_log_share_diagnostic(tmp_path: Path
                 "rejectedShareDelta": 0,
             },
             {
-                "phase": "03-tertiary",
+                "phase": "02-secondary",
                 "label": "Nerdminers",
                 "phaseStatus": "PASSED",
                 "poolHost": "pool.nerdminers.org",
@@ -275,11 +248,11 @@ def test_qualification_release_evidence_rejects_firmware_api_proof(tmp_path: Pat
     phases = [
         {
             "phase": "01-primary",
-            "label": "PublicPool",
+            "label": "Bitronics",
             "phaseStatus": "PASSED",
-            "poolHost": "public-pool.io",
-            "poolPort": 3333,
-            "assignedPoolDifficulty": 0.0001,
+            "poolHost": "pool.bitronics.store",
+            "poolPort": 3334,
+            "assignedPoolDifficulty": 0.0005,
             "acceptedShareDelta": 10,
             "diagnosticAcceptedShareDelta": 10,
             "acceptedShareProofSource": "firmware_api",
@@ -295,26 +268,6 @@ def test_qualification_release_evidence_rejects_firmware_api_proof(tmp_path: Pat
         },
         {
             "phase": "02-secondary",
-            "label": "Bitronics",
-            "phaseStatus": "PASSED",
-            "poolHost": "pool.bitronics.store",
-            "poolPort": 3334,
-            "assignedPoolDifficulty": 0.0005,
-            "acceptedShareDelta": 10,
-            "diagnosticAcceptedShareDelta": 10,
-            "acceptedShareProofSource": "pool_stats",
-            "qualificationAcceptedShareDelta": 10,
-            "qualificationProofSource": "pool_stats",
-            "poolStatsAcceptedShareDelta": 10,
-            "poolStatsWorkerBound": True,
-            "poolStatsAcceptedShareCounter": True,
-            "poolStatsSupportsDelta": True,
-            "poolStatsQualificationCapable": True,
-            "requiredAcceptedShareDelta": 10,
-            "rejectedShareDelta": 0,
-        },
-        {
-            "phase": "03-tertiary",
             "label": "Nerdminers",
             "phaseStatus": "PASSED",
             "poolHost": "pool.nerdminers.org",
@@ -338,19 +291,19 @@ def test_qualification_release_evidence_rejects_firmware_api_proof(tmp_path: Pat
 
     report = module.build_report(ROOT_DIR, summary_path)
 
-    assert "qualification pool phase lacks pool-side accepted-share proof: PublicPool" in report["releaseBlockers"]
-    assert "qualification pool phase has insufficient pool-side accepted-share delta: PublicPool" in report["releaseBlockers"]
+    assert "qualification pool phase lacks pool-side accepted-share proof: Bitronics" in report["releaseBlockers"]
+    assert "qualification pool phase has insufficient pool-side accepted-share delta: Bitronics" in report["releaseBlockers"]
 
 
 def test_qualification_release_evidence_rejects_qemu_log_proof(tmp_path: Path):
     module = load_module()
     phase = {
         "phase": "01-primary",
-        "label": "PublicPool",
+        "label": "Bitronics",
         "phaseStatus": "PASSED",
-        "poolHost": "public-pool.io",
-        "poolPort": 3333,
-        "assignedPoolDifficulty": 0.0001,
+        "poolHost": "pool.bitronics.store",
+        "poolPort": 3334,
+        "assignedPoolDifficulty": 0.0005,
         "acceptedShareDelta": 10,
         "diagnosticAcceptedShareDelta": 10,
         "acceptedShareProofSource": "qemu_log",
@@ -365,11 +318,14 @@ def test_qualification_release_evidence_rejects_qemu_log_proof(tmp_path: Path):
         "requiredAcceptedShareDelta": 10,
         "rejectedShareDelta": 0,
     }
-    summary_path = write_summary(tmp_path, mode="qualification", phases=[phase, {**phase, "label": "Bitronics"}, {**phase, "label": "Nerdminers"}])
+    summary_path = write_summary(
+        tmp_path,
+        mode="qualification",
+        phases=[phase, {**phase, "phase": "02-secondary", "label": "Nerdminers"}],
+    )
 
     report = module.build_report(ROOT_DIR, summary_path)
 
-    assert "qualification pool phase lacks pool-side accepted-share proof: PublicPool" in report["releaseBlockers"]
     assert "qualification pool phase lacks pool-side accepted-share proof: Bitronics" in report["releaseBlockers"]
     assert "qualification pool phase lacks pool-side accepted-share proof: Nerdminers" in report["releaseBlockers"]
 
@@ -377,7 +333,7 @@ def test_qualification_release_evidence_rejects_qemu_log_proof(tmp_path: Path):
 def test_qualification_release_evidence_accepts_pool_stratum_response_proof(tmp_path: Path):
     module = load_module()
     phases = []
-    for label in ("PublicPool", "Bitronics", "Nerdminers"):
+    for label in ("Bitronics", "Nerdminers"):
         phases.append(
             {
                 "phase": label,
@@ -421,11 +377,11 @@ def test_qualification_release_evidence_rejects_unverified_pool_stratum_response
     module = load_module()
     phase = {
         "phase": "01-primary",
-        "label": "PublicPool",
+        "label": "Bitronics",
         "phaseStatus": "PASSED",
-        "poolHost": "public-pool.io",
-        "poolPort": 3333,
-        "assignedPoolDifficulty": 0.0001,
+        "poolHost": "pool.bitronics.store",
+        "poolPort": 3334,
+        "assignedPoolDifficulty": 0.0005,
         "acceptedShareDelta": 10,
         "diagnosticAcceptedShareDelta": 10,
         "acceptedShareProofSource": "pool_stratum_response",
@@ -441,17 +397,21 @@ def test_qualification_release_evidence_rejects_unverified_pool_stratum_response
         "requiredAcceptedShareDelta": 10,
         "rejectedShareDelta": 0,
     }
-    summary_path = write_summary(tmp_path, mode="qualification", phases=[phase, {**phase, "label": "Bitronics"}, {**phase, "label": "Nerdminers"}])
+    summary_path = write_summary(
+        tmp_path,
+        mode="qualification",
+        phases=[phase, {**phase, "phase": "02-secondary", "label": "Nerdminers"}],
+    )
 
     report = module.build_report(ROOT_DIR, summary_path)
 
-    assert "qualification pool phase lacks verified worker identity for Stratum proof: PublicPool" in report["releaseBlockers"]
+    assert "qualification pool phase lacks verified worker identity for Stratum proof: Bitronics" in report["releaseBlockers"]
 
 
 def test_qualification_release_evidence_accepts_pool_stats_proof(tmp_path: Path):
     module = load_module()
     phases = []
-    for label in ("PublicPool", "Bitronics", "Nerdminers"):
+    for label in ("Bitronics", "Nerdminers"):
         phases.append(
             {
                 "phase": label,
@@ -483,42 +443,30 @@ def test_qualification_release_evidence_accepts_pool_stats_proof(tmp_path: Path)
 
 def test_qualification_release_evidence_rejects_non_capable_pool_stats_kind(tmp_path: Path):
     module = load_module()
-    public_phase = {
+    bitronics_phase = {
         "phase": "01-primary",
-        "label": "PublicPool",
+        "label": "Bitronics",
         "phaseStatus": "PASSED",
-        "poolHost": "public-pool.io",
-        "poolPort": 3333,
-        "assignedPoolDifficulty": 0.0001,
+        "poolHost": "pool.bitronics.store",
+        "poolPort": 3334,
+        "assignedPoolDifficulty": 0.0005,
         "acceptedShareDelta": 10,
         "diagnosticAcceptedShareDelta": 10,
         "acceptedShareProofSource": "pool_stats",
         "qualificationAcceptedShareDelta": 10,
         "qualificationProofSource": "pool_stats",
         "poolStatsAcceptedShareDelta": 10,
-        "poolStatsProofKind": "public_pool_bestdiff",
-        "poolStatsWorkerBound": True,
+        "poolStatsProofKind": "bitronics_status_evidence",
+        "poolStatsWorkerBound": False,
         "poolStatsAcceptedShareCounter": False,
         "poolStatsSupportsDelta": False,
         "poolStatsQualificationCapable": False,
         "requiredAcceptedShareDelta": 10,
         "rejectedShareDelta": 0,
     }
-    bitronics_phase = {
-        **public_phase,
-        "phase": "02-secondary",
-        "label": "Bitronics",
-        "poolHost": "pool.bitronics.store",
-        "poolPort": 3334,
-        "poolStatsProofKind": "bitronics_status_evidence",
-        "poolStatsWorkerBound": False,
-        "poolStatsAcceptedShareCounter": False,
-        "poolStatsSupportsDelta": False,
-        "poolStatsQualificationCapable": False,
-    }
     nerdminers_phase = {
-        **public_phase,
-        "phase": "03-tertiary",
+        **bitronics_phase,
+        "phase": "02-secondary",
         "label": "Nerdminers",
         "poolHost": "pool.nerdminers.org",
         "poolPort": 3333,
@@ -528,13 +476,10 @@ def test_qualification_release_evidence_rejects_non_capable_pool_stats_kind(tmp_
         "poolStatsSupportsDelta": True,
         "poolStatsQualificationCapable": True,
     }
-    summary_path = write_summary(tmp_path, mode="qualification", phases=[public_phase, bitronics_phase, nerdminers_phase])
+    summary_path = write_summary(tmp_path, mode="qualification", phases=[bitronics_phase, nerdminers_phase])
 
     report = module.build_report(ROOT_DIR, summary_path)
 
-    assert "qualification pool phase stats are not accepted-share counters: PublicPool" in report["releaseBlockers"]
-    assert "qualification pool phase stats do not support accepted-share deltas: PublicPool" in report["releaseBlockers"]
-    assert "qualification pool phase stats are not accepted-share-count capable: PublicPool" in report["releaseBlockers"]
     assert "qualification pool phase stats are not worker-bound: Bitronics" in report["releaseBlockers"]
     assert "qualification pool phase stats are not accepted-share counters: Bitronics" in report["releaseBlockers"]
     assert "qualification pool phase stats do not support accepted-share deltas: Bitronics" in report["releaseBlockers"]
@@ -544,7 +489,7 @@ def test_qualification_release_evidence_rejects_non_capable_pool_stats_kind(tmp_
 def test_qualification_release_evidence_rejects_legacy_summary_without_strict_fields(tmp_path: Path):
     module = load_module()
     phases = []
-    for label in ("PublicPool", "Bitronics", "Nerdminers"):
+    for label in ("Bitronics", "Nerdminers"):
         phases.append(
             {
                 "phase": label,
@@ -563,7 +508,6 @@ def test_qualification_release_evidence_rejects_legacy_summary_without_strict_fi
 
     report = module.build_report(ROOT_DIR, summary_path)
 
-    assert "qualification pool phase is missing strict pool-side share fields: PublicPool" in report["releaseBlockers"]
     assert "qualification pool phase is missing strict pool-side share fields: Bitronics" in report["releaseBlockers"]
     assert "qualification pool phase is missing strict pool-side share fields: Nerdminers" in report["releaseBlockers"]
 
@@ -575,28 +519,17 @@ def test_release_evidence_report_rejects_unknown_or_missing_share_proof(tmp_path
         phases=[
             {
                 "phase": "01-primary",
-                "label": "PublicPool",
-                "phaseStatus": "PASSED",
-                "poolHost": "public-pool.io",
-                "poolPort": 3333,
-                "assignedPoolDifficulty": 0.0001,
-                "acceptedShareDelta": 0,
-                "acceptedShareProofSource": "firmware_api",
-                "rejectedShareDelta": 0,
-            },
-            {
-                "phase": "02-secondary",
                 "label": "Bitronics",
                 "phaseStatus": "PASSED",
                 "poolHost": "pool.bitronics.store",
                 "poolPort": 3334,
                 "assignedPoolDifficulty": 0.0005,
-                "acceptedShareDelta": 1,
+                "acceptedShareDelta": 0,
                 "acceptedShareProofSource": "operator_claim",
                 "rejectedShareDelta": 0,
             },
             {
-                "phase": "03-tertiary",
+                "phase": "02-secondary",
                 "label": "Nerdminers",
                 "phaseStatus": "FAILED",
                 "poolHost": "pool.nerdminers.org",
@@ -611,7 +544,7 @@ def test_release_evidence_report_rejects_unknown_or_missing_share_proof(tmp_path
 
     report = module.build_report(ROOT_DIR, summary_path)
 
-    assert "required live pool phase has no accepted-share delta: PublicPool" in report["releaseBlockers"]
+    assert "required live pool phase has no accepted-share delta: Bitronics" in report["releaseBlockers"]
     assert "required live pool phase has unsupported proof source: Bitronics" in report["releaseBlockers"]
     assert "required live pool phase did not pass: Nerdminers" in report["releaseBlockers"]
 

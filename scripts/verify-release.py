@@ -30,11 +30,10 @@ PLAYWRIGHT_AXEOS_SPEC = ROOT_DIR / "tests" / "browser" / "axeos.spec.ts"
 TESTS_BROWSER_DIR = ROOT_DIR / "tests" / "browser"
 DEFAULT_OUT_DIR = ROOT_DIR / "out" / "release-matrix"
 DEFAULT_VERIFY_POOL_USER = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+REQUIRED_POOL_LABELS = ("Bitronics", "Nerdminers")
 SMOKE_PHASE_TIMEOUT_SECONDS = 120
 SMOKE_ESTIMATED_EFFECTIVE_HASHRATE_HPS = 12500.0
 SMOKE_TARGET_PROBABILITY = 0.95
-PUBLIC_POOL_SMOKE_ASSIGNED_DIFFICULTY = 0.0001
-PUBLIC_POOL_SMOKE_PHASE_TIMEOUT_SECONDS = 120
 BITRONICS_SMOKE_ASSIGNED_DIFFICULTY = 0.0005
 BITRONICS_SMOKE_PHASE_TIMEOUT_SECONDS = 600
 NERDMINERS_SMOKE_ASSIGNED_DIFFICULTY = 0.001
@@ -56,17 +55,6 @@ POOL_STATS_CAPABILITIES: dict[str, dict[str, Any]] = {
         "qualification_capable": True,
         "semantics": "worker-bound accepted-share counters from CKPool-style stats",
     },
-    "public_pool_bestdiff": {
-        "worker_bound": True,
-        "accepted_share_counter": False,
-        "rejected_share_counter": False,
-        "supports_delta": False,
-        "qualification_capable": False,
-        "semantics": (
-            "worker-scoped best-difficulty and chart-derived diagnostic evidence; "
-            "not an accepted-share counter"
-        ),
-    },
     "bitronics_status_evidence": {
         "worker_bound": False,
         "accepted_share_counter": False,
@@ -80,14 +68,11 @@ POOL_STATS_CAPABILITIES: dict[str, dict[str, Any]] = {
     },
 }
 WORKER_POOL_SLUG_BY_PHASE = {
-    "public": "pub",
     "bitronics": "bit",
     "nerdminers": "nerd",
 }
 BITRONICS_POOL_HOME_URL = "https://pool.bitronics.store/"
 BITRONICS_STATS_PAGE_TEMPLATE = "https://pool.bitronics.store/stats/{pool_user}"
-PUBLIC_POOL_STATS_URL_TEMPLATE = "https://public-pool.io:40557/api/client/{pool_user}"
-PUBLIC_POOL_WORKER_STATS_URL_TEMPLATE = "https://public-pool.io:40557/api/client/{pool_user}/{worker}"
 BITRONICS_API_TOKEN_PATTERN = re.compile(r"window\.POOL_API_TOKEN\s*=\s*['\"]([^'\"]+)['\"]")
 
 
@@ -221,10 +206,6 @@ def smoke_feasibility(label: str, assigned_difficulty: float, configured_timeout
     }
 
 
-def public_pool_smoke_feasibility() -> dict[str, Any]:
-    return smoke_feasibility("PublicPool", PUBLIC_POOL_SMOKE_ASSIGNED_DIFFICULTY, PUBLIC_POOL_SMOKE_PHASE_TIMEOUT_SECONDS)
-
-
 def bitronics_smoke_feasibility() -> dict[str, Any]:
     return smoke_feasibility("Bitronics", BITRONICS_SMOKE_ASSIGNED_DIFFICULTY, BITRONICS_SMOKE_PHASE_TIMEOUT_SECONDS)
 
@@ -235,24 +216,6 @@ def nerdminers_smoke_feasibility() -> dict[str, Any]:
 PHASES = (
     {
         "name": "01-primary",
-        "slug": "public",
-        "label": "PublicPool",
-        "host": "public-pool.io",
-        "port": 3333,
-        "difficulty": 0.0001,
-        "subscribe_agent": "",
-        "required_for_pass": True,
-        "require_accepted_share": True,
-        "require_accepted_log": False,
-        "require_local_diff_at_pool_difficulty": True,
-        "pool_stats_kind": "public_pool_bestdiff",
-        "pool_stats_url_template": PUBLIC_POOL_STATS_URL_TEMPLATE,
-        "pool_stats_page_url_template": PUBLIC_POOL_WORKER_STATS_URL_TEMPLATE,
-        "smoke_phase_timeout_seconds": PUBLIC_POOL_SMOKE_PHASE_TIMEOUT_SECONDS,
-        "smoke_feasibility": public_pool_smoke_feasibility,
-    },
-    {
-        "name": "02-secondary",
         "slug": "bitronics",
         "label": "Bitronics",
         "host": "pool.bitronics.store",
@@ -271,7 +234,7 @@ PHASES = (
         "smoke_feasibility": bitronics_smoke_feasibility,
     },
     {
-        "name": "03-tertiary",
+        "name": "02-secondary",
         "slug": "nerdminers",
         "label": "Nerdminers",
         "host": "pool.nerdminers.org",
@@ -356,12 +319,12 @@ def pool_stats_capability_fields(kind: str) -> dict[str, Any]:
 def release_policy_text(mode: str) -> str:
     if mode == "qualification":
         return (
-            "PublicPool + Bitronics + Nerdminers required; each phase proves at least "
+            "Bitronics + Nerdminers required; each phase proves at least "
             "5 pool-side accepted shares through direct live Stratum "
             "acceptance or worker-bound pool stats; timeout is sized from the observed "
             "Nerdminers 0.001-difficulty accepted-share rate"
         )
-    return "PublicPool + Bitronics + Nerdminers required; smoke waits for one accepted share per pool with explicit probability-based per-pool timeouts"
+    return "Bitronics + Nerdminers required; smoke waits for one accepted share per pool with explicit probability-based per-pool timeouts"
 
 
 def load_virtualaxe_module():
@@ -564,39 +527,6 @@ def bitronics_pool_snapshot(payload: dict[str, Any], worker_name: str) -> dict[s
     }
 
 
-def public_pool_best_difficulty(worker: dict[str, Any] | None) -> float:
-    if not worker:
-        return 0.0
-    try:
-        return float(worker.get("bestDifficulty", 0) or 0)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def public_pool_worker(payload: dict[str, Any], worker_name: str) -> dict[str, Any] | None:
-    display_worker = pool_stats_display_worker(worker_name)
-    workers = [
-        worker
-        for worker in payload.get("workers", []) or []
-        if str(worker.get("name", "")) in {worker_name, display_worker}
-    ]
-    if not workers:
-        return None
-    return max(workers, key=public_pool_best_difficulty)
-
-
-def public_pool_snapshot(payload: dict[str, Any], worker_name: str) -> dict[str, Any]:
-    worker = public_pool_worker(payload, worker_name) or {}
-    return {
-        "worker": worker_name,
-        "shares": 0.0,
-        "lastshare": worker.get("lastSeen"),
-        "workers": payload.get("workersCount", 0),
-        "bestDifficulty": public_pool_best_difficulty(worker),
-        "workerStats": worker,
-    }
-
-
 def pool_stats_worker_snapshot(
     pool_stats_url: str,
     worker_name: str,
@@ -609,11 +539,6 @@ def pool_stats_worker_snapshot(
         snapshot = bitronics_pool_snapshot(payload, worker_name)
         snapshot["url"] = pool_stats_url
         return snapshot
-    if kind == "public_pool_bestdiff":
-        snapshot = public_pool_snapshot(payload, worker_name)
-        snapshot["url"] = pool_stats_url
-        return snapshot
-
     worker = pool_stats_worker(payload, worker_name) or {}
     shares = 0.0
     try:
@@ -1391,7 +1316,7 @@ def main() -> int:
         "mode": args.mode,
         "status": overall_status,
         "releaseGate": {
-            "requiredPools": ["PublicPool", "Bitronics", "Nerdminers"],
+            "requiredPools": list(REQUIRED_POOL_LABELS),
             "policy": release_policy_text(args.mode),
             "smoke": {
                 "phaseTimeoutSeconds": SMOKE_PHASE_TIMEOUT_SECONDS,

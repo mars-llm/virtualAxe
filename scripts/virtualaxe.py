@@ -1721,7 +1721,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     verify_release = subparsers.add_parser(
         "verify-release",
-        help="Run the automated external/live three-pool release gate.",
+        help="Run the automated external/live Bitronics and Nerdminers release gate.",
         description="Run automated live pool verification for the selected source.",
     )
     verify_release.add_argument("--source", default=source_registry().default_source)

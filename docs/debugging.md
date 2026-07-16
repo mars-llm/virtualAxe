@@ -23,7 +23,8 @@
 - Use `/api/system/info` while QEMU is running to inspect pool settings, worker
   metadata, share counters, and virtual device metadata.
 - Use `make verify-submit-replay` for deterministic local submit-boundary proof.
-- Use `make verify-release` for the remote-pool smoke gate.
+- Use `make verify-release` for the Bitronics and Nerdminers remote-pool smoke
+  gate. PublicPool is an optional interoperability target, not a release gate.
 - Use `VERIFY_RELEASE_MODE=qualification make verify-release` for the
   release-prep qualification gate.
 - Re-run `scripts/apply-patches.sh` after changing or syncing the configured

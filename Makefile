@@ -27,7 +27,7 @@ help:
 	@printf "  make dashboard      [runtime mutating] Launch the Bitaxe operator dashboard on the safe default port\n"
 	@printf "  make e2e            [runtime mutating] Run the end-to-end QEMU/API/browser validation flow\n"
 	@printf "  make verify-submit-replay [runtime mutating] Run the deterministic low-difficulty submit-boundary replay\n"
-	@printf "  make verify-release [external/live] Run the gamma pool smoke gate (PublicPool + Bitronics + Nerdminers)\n"
+	@printf "  make verify-release [external/live] Run the gamma pool smoke gate (Bitronics + Nerdminers)\n"
 	@printf "  make patch-check    [ignored-state mutating] Apply the patch stack against the configured source pin\n"
 	@printf "  make patch-check-upstream [external/live, ignored-state mutating] Apply the patch stack against UPSTREAM_REF (default origin/master)\n"
 	@printf "  make test-ci        [runtime mutating] Run the upstream test-ci QEMU proof\n"

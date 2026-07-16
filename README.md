@@ -153,6 +153,9 @@ rejected-share delta violation. Pool-side proof can come from a direct remote
 pool Stratum accepted response to a current-phase `mining.submit`, or from a
 worker-bound pool stats counter when a pool exposes one.
 
+The automated live gate targets Bitronics and Nerdminers. PublicPool remains an
+optional runtime preset, but its public instances are not release quality gates.
+
 Firmware/API counters, best-difficulty charts, worker-active status, screenshots,
 and generic QEMU log activity are diagnostics only. QEMU logs are accepted only
 as the transport for validated live pool Stratum responses.

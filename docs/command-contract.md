@@ -50,8 +50,8 @@ right gate without guessing.
 | `make dashboard` | runtime mutating | Starts the local operator dashboard. |
 | `make e2e` | runtime mutating | Runs QEMU/API/browser validation against local runtime state. |
 | `make verify-submit-replay` | runtime mutating | Runs deterministic local Stratum replay and QEMU firmware proof. |
-| `make verify-release` | external/live | Runs the automated live PublicPool, Bitronics, and Nerdminers smoke gate with the default public test pool user. Each pool phase exits when its accepted-share proof requirement is met, a fatal invariant fails, or the phase timeout is reached. |
-| `VERIFY_RELEASE_MODE=qualification make verify-release` | external/live | Runs the automated release-prep qualification gate with the same three-pool verifier. Each pool phase requires five pool-side accepted shares and zero rejected-share delta violation. Pool-side proof means direct remote-pool Stratum accepted responses for current-phase submits, or worker-bound pool stats accepted-share counters when available. Firmware/API counters, best-difficulty/chart data, worker-active status, and generic QEMU logs are diagnostic only. The wait helper streams progress diagnostics and fails early when fatal invariants such as API readability, expected pool identity, or rejected-share limits are broken. |
+| `make verify-release` | external/live | Runs the automated live Bitronics and Nerdminers smoke gate with the default public test pool user. Each pool phase exits when its accepted-share proof requirement is met, a fatal invariant fails, or the phase timeout is reached. |
+| `VERIFY_RELEASE_MODE=qualification make verify-release` | external/live | Runs the automated release-prep qualification gate with the same two-pool verifier. Each pool phase requires five pool-side accepted shares and zero rejected-share delta violation. Pool-side proof means direct remote-pool Stratum accepted responses for current-phase submits, or worker-bound pool stats accepted-share counters when available. Firmware/API counters, best-difficulty/chart data, worker-active status, and generic QEMU logs are diagnostic only. The wait helper streams progress diagnostics and fails early when fatal invariants such as API readability, expected pool identity, or rejected-share limits are broken. |
 | `make test-ci` | runtime mutating | Runs upstream ESP-IDF test-ci proof when the selected source provides it. Sources without an upstream `test-ci/` project use the source-aware QEMU API boot smoke with local-only closed Stratum endpoints. |
 | `make test-api` | runtime mutating | Runs API validation against a local virtual runtime. |
 | `make test-browser` | runtime mutating | Runs browser smoke validation against a local virtual runtime. |
@@ -66,3 +66,7 @@ same-session `make verify-release SOURCE=<source>` runs for the sources being cl
 `make release-evidence` to normalize ignored release evidence. If live
 verification has not been run for a claimed source, that source is not release
 ready.
+
+PublicPool remains available through `./vaxe --pool public` for optional
+interoperability work. It is not a release quality gate because public-instance
+difficulty and deployment policy can change independently of virtualAxe.

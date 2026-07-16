@@ -16,7 +16,7 @@ def load_module():
     return module
 
 
-def test_parse_args_uses_default_public_pool_user(monkeypatch):
+def test_parse_args_uses_default_verifier_pool_user(monkeypatch):
     module = load_module()
     monkeypatch.delenv("VERIFY_POOL_USER", raising=False)
     monkeypatch.setattr(sys, "argv", ["verify-release.py"])
@@ -62,31 +62,29 @@ def test_release_phases_match_gamma_pool_gate_policy():
 
     phases = module.phases_for_mode("smoke")
 
-    assert [phase["slug"] for phase in phases] == ["public", "bitronics", "nerdminers"]
+    assert module.REQUIRED_POOL_LABELS == ("Bitronics", "Nerdminers")
+    assert [phase["slug"] for phase in phases] == ["bitronics", "nerdminers"]
+    assert [phase["label"] for phase in phases] == list(module.REQUIRED_POOL_LABELS)
     assert [(phase["host"], phase["port"]) for phase in module.PHASES] == [
-        ("public-pool.io", 3333),
         ("pool.bitronics.store", 3334),
         ("pool.nerdminers.org", 3333),
     ]
     assert [phase["subscribe_agent"] for phase in phases] == [
-        "",
         "NerdMinerV2/virtualAxe-gamma",
         "NerdMinerV2/virtualAxe-gamma",
     ]
-    assert [phase["difficulty"] for phase in phases] == [0.0001, 0.0001, 0.0005]
-    assert [phase["min_accepted_share_delta"] for phase in phases] == [1, 1, 1]
-    assert [phase["min_duration_seconds"] for phase in phases] == [0, 0, 0]
-    assert [phase["phase_timeout_seconds"] for phase in phases] == [120, 600, 1200]
-    assert [phase["smoke_phase_timeout_seconds"] for phase in phases] == [120, 600, 1200]
-    assert [phase["required_for_pass"] for phase in phases] == [True, True, True]
-    assert [phase["require_accepted_share"] for phase in phases] == [True, True, True]
-    assert [phase["require_accepted_log"] for phase in phases] == [False, False, False]
-    assert phases[0]["pool_stats_kind"] == "public_pool_bestdiff"
-    assert phases[0]["pool_stats_url_template"] == "https://public-pool.io:40557/api/client/{pool_user}"
-    assert phases[0]["pool_stats_page_url_template"] == "https://public-pool.io:40557/api/client/{pool_user}/{worker}"
-    assert phases[1]["pool_stats_kind"] == "bitronics_status_evidence"
-    assert phases[1]["pool_stats_url_template"] == "https://pool.bitronics.store/api/stats/{pool_user}"
-    assert phases[2]["pool_stats_url_template"] == "https://pool.nerdminers.org/users/{pool_user}"
+    assert [phase["difficulty"] for phase in phases] == [0.0001, 0.0005]
+    assert [phase["min_accepted_share_delta"] for phase in phases] == [1, 1]
+    assert [phase["min_duration_seconds"] for phase in phases] == [0, 0]
+    assert [phase["phase_timeout_seconds"] for phase in phases] == [600, 1200]
+    assert [phase["smoke_phase_timeout_seconds"] for phase in phases] == [600, 1200]
+    assert [phase["required_for_pass"] for phase in phases] == [True, True]
+    assert [phase["require_accepted_share"] for phase in phases] == [True, True]
+    assert [phase["require_accepted_log"] for phase in phases] == [False, False]
+    assert phases[0]["pool_stats_kind"] == "bitronics_status_evidence"
+    assert phases[0]["pool_stats_url_template"] == "https://pool.bitronics.store/api/stats/{pool_user}"
+    assert phases[1]["pool_stats_url_template"] == "https://pool.nerdminers.org/users/{pool_user}"
+    assert "PublicPool" not in module.release_policy_text("smoke")
 
 
 def test_source_smoke_timeouts_are_probability_based_on_effective_hash_attempts():
@@ -137,26 +135,18 @@ def test_qualification_mode_requires_five_accepted_shares_without_fixed_duration
 
     phases = module.phases_for_mode("qualification")
 
-    assert [phase["min_accepted_share_delta"] for phase in phases] == [5, 5, 5]
-    assert [phase["require_pool_side_accepted_share"] for phase in phases] == [True, True, True]
-    assert [phase["require_pool_stats_accepted_share"] for phase in phases] == [False, False, False]
-    assert [phase["pool_stats_qualification_capable"] for phase in phases] == [False, False, True]
-    assert [phase["min_duration_seconds"] for phase in phases] == [0, 0, 0]
-    assert [phase["phase_timeout_seconds"] for phase in phases] == [4200, 4200, 4200]
-    assert [phase["max_rejected_share_delta"] for phase in phases] == [0, 0, 0]
+    assert [phase["min_accepted_share_delta"] for phase in phases] == [5, 5]
+    assert [phase["require_pool_side_accepted_share"] for phase in phases] == [True, True]
+    assert [phase["require_pool_stats_accepted_share"] for phase in phases] == [False, False]
+    assert [phase["pool_stats_qualification_capable"] for phase in phases] == [False, True]
+    assert [phase["min_duration_seconds"] for phase in phases] == [0, 0]
+    assert [phase["phase_timeout_seconds"] for phase in phases] == [4200, 4200]
+    assert [phase["max_rejected_share_delta"] for phase in phases] == [0, 0]
 
 
 def test_pool_stats_capability_metadata_documents_current_adapters():
     module = load_module()
     phases = {phase["label"]: phase for phase in module.phases_for_mode("qualification")}
-
-    public = phases["PublicPool"]
-    assert public["pool_stats_worker_bound"] is True
-    assert public["pool_stats_accepted_share_counter"] is False
-    assert public["pool_stats_supports_delta"] is False
-    assert public["pool_stats_rejected_share_counter"] is False
-    assert "best-difficulty" in public["pool_stats_qualification_capability"]
-    assert "not an accepted-share counter" in public["pool_stats_qualification_capability"]
 
     bitronics = phases["Bitronics"]
     assert bitronics["pool_stats_worker_bound"] is False
@@ -177,7 +167,7 @@ def test_pool_stats_capability_metadata_documents_current_adapters():
 def test_worker_name_uses_short_pool_compatible_run_token():
     module = load_module()
 
-    run_id = "20260428-three-pool-smoke-api-restart"
+    run_id = "20260428-live-pool-smoke-api-restart"
     bitronics_worker = module.worker_name(
         TEST_POOL_USER,
         "gamma",
@@ -191,32 +181,21 @@ def test_worker_name_uses_short_pool_compatible_run_token():
         run_id,
     )
     token = module.worker_run_token(run_id)
-    public_worker = module.worker_name(
-        TEST_POOL_USER,
-        "gamma",
-        "public",
-        run_id,
-    )
-
     assert token.startswith("r")
     assert token.isalnum()
     assert token[1:].islower()
     assert token[1:].isalpha()
-    assert public_worker == f"{TEST_POOL_USER}.vagpub{token}"
     assert bitronics_worker == f"{TEST_POOL_USER}.vagbit{token}"
     assert nerdminers_worker == f"{TEST_POOL_USER}.vagnerd{token}"
-    assert "20260428" not in public_worker
     assert "20260428" not in bitronics_worker
     assert "20260428" not in nerdminers_worker
-    assert public_worker.count(".") == 1
     assert bitronics_worker.count(".") == 1
     assert nerdminers_worker.count(".") == 1
-    assert len(public_worker) < 90
     assert len(bitronics_worker) < 90
     assert len(nerdminers_worker) < 90
 
 
-def test_worker_token_avoids_public_pool_numeric_suffix_regression():
+def test_worker_token_uses_alphabetic_suffix():
     module = load_module()
 
     token = module.worker_run_token("20260505-221001")
@@ -241,7 +220,7 @@ def test_required_pool_phase_status_requires_configured_share_delta():
 
 def test_qualification_phase_status_requires_five_pool_side_accepts_and_zero_rejects():
     module = load_module()
-    phase = dict(module.phases_for_mode("qualification")[2])
+    phase = dict(module.phases_for_mode("qualification")[1])
 
     assert module.phase_status(phase, True, 5, 0, 0) == "FAILED"
     assert module.phase_status(phase, True, 5, 0, 0, qualification_accepted_share_delta=4) == "FAILED"
@@ -259,7 +238,7 @@ def test_non_capable_stats_metadata_does_not_block_direct_protocol_qualification
 
 def test_bitronics_primary_settings_include_release_agent_and_difficulty():
     module = load_module()
-    phase = dict(module.phases_for_mode("smoke")[1])
+    phase = dict(module.phases_for_mode("smoke")[0])
     payload = module.phase_primary_settings(phase, "bc1ptest.gamma.bitronics.run")
 
     assert payload == {
@@ -273,7 +252,7 @@ def test_bitronics_primary_settings_include_release_agent_and_difficulty():
 
 def test_nerdnos_primary_settings_use_source_native_api_fields():
     module = load_module()
-    phase = dict(module.phases_for_mode("smoke")[1])
+    phase = dict(module.phases_for_mode("smoke")[0])
     payload = module.phase_primary_settings(phase, "bc1ptest.gamma.bitronics.run", "nerdnos")
 
     assert payload == {
@@ -286,17 +265,17 @@ def test_nerdnos_primary_settings_use_source_native_api_fields():
 
 def test_phase_runtime_paths_are_per_phase_and_inside_release_bundle(tmp_path: Path):
     module = load_module()
-    public_phase, bitronics_phase, _ = module.phases_for_mode("smoke")
+    bitronics_phase, nerdminers_phase = module.phases_for_mode("smoke")
 
-    public_out, public_state = module.phase_runtime_paths(tmp_path, public_phase)
     bitronics_out, bitronics_state = module.phase_runtime_paths(tmp_path, bitronics_phase)
+    nerdminers_out, nerdminers_state = module.phase_runtime_paths(tmp_path, nerdminers_phase)
 
-    assert public_out == tmp_path / "runtime" / "01-primary" / "out"
-    assert public_state == tmp_path / "runtime" / "01-primary" / "state"
-    assert bitronics_out == tmp_path / "runtime" / "02-secondary" / "out"
-    assert bitronics_state == tmp_path / "runtime" / "02-secondary" / "state"
-    assert public_out != bitronics_out
-    assert public_state != bitronics_state
+    assert bitronics_out == tmp_path / "runtime" / "01-primary" / "out"
+    assert bitronics_state == tmp_path / "runtime" / "01-primary" / "state"
+    assert nerdminers_out == tmp_path / "runtime" / "02-secondary" / "out"
+    assert nerdminers_state == tmp_path / "runtime" / "02-secondary" / "state"
+    assert bitronics_out != nerdminers_out
+    assert bitronics_state != nerdminers_state
 
 
 def test_settings_match_allows_float_roundtrip_noise():
@@ -334,7 +313,7 @@ def test_run_command_can_stream_wait_stderr(capsys):
 
 def test_summarize_phase_keeps_wait_workers_when_after_payload_lacks_workers(tmp_path: Path):
     module = load_module()
-    phase = dict(module.phases_for_mode("smoke")[1])
+    phase = dict(module.phases_for_mode("smoke")[0])
     wait_payload = {
         "durationSeconds": 12.0,
         "poolDifficulty": 0.0005,
@@ -376,7 +355,7 @@ def test_summarize_phase_keeps_wait_workers_when_after_payload_lacks_workers(tmp
 
 def test_nerdminers_phase_can_use_pool_side_worker_stats_for_acceptance(tmp_path: Path):
     module = load_module()
-    phase = dict(module.phases_for_mode("smoke")[2])
+    phase = dict(module.phases_for_mode("smoke")[1])
     wait_payload = {
         "durationSeconds": 12.0,
         "poolDifficulty": 0.0005,
@@ -421,7 +400,7 @@ def test_nerdminers_phase_can_use_pool_side_worker_stats_for_acceptance(tmp_path
 
 def test_bitronics_phase_cannot_use_pool_wide_last_share_for_smoke_acceptance(tmp_path: Path):
     module = load_module()
-    phase = dict(module.phases_for_mode("smoke")[1])
+    phase = dict(module.phases_for_mode("smoke")[0])
     wait_payload = {
         "durationSeconds": 42.0,
         "poolDifficulty": 0.0005,
@@ -468,7 +447,7 @@ def test_bitronics_phase_cannot_use_pool_wide_last_share_for_smoke_acceptance(tm
 
 def test_pool_stats_before_failure_records_error_without_aborting_phase(tmp_path: Path, monkeypatch):
     module = load_module()
-    phase = dict(module.phases_for_mode("smoke")[2])
+    phase = dict(module.phases_for_mode("smoke")[1])
 
     def fail_snapshot(*args, **kwargs):
         raise RuntimeError("stats unavailable")
@@ -488,51 +467,6 @@ def test_pool_stats_before_failure_records_error_without_aborting_phase(tmp_path
     assert last_share is None
     assert payload["error"] == "stats unavailable"
     assert payload["worker"] == "bc1ptest.vagnerdrtest"
-
-
-def test_public_pool_phase_can_use_worker_bestdiff_for_smoke_acceptance(tmp_path: Path):
-    module = load_module()
-    phase = dict(module.phases_for_mode("smoke")[0])
-    wait_payload = {
-        "durationSeconds": 18.0,
-        "poolDifficulty": 0.0001,
-        "acceptedShareProofSource": "pool_stats",
-        "poolStatsURL": "https://public-pool.io:40557/api/client/bc1ptest",
-        "poolStatsWorker": "bc1ptest.vagpubrtest",
-        "poolStatsProofKind": "public_pool_bestdiff",
-        "poolStatsSharesBefore": 0.0,
-        "poolStatsSharesAfter": 1.0,
-        "poolStatsAcceptedShareDelta": 1.0,
-        "poolStatsAccepted": True,
-        "poolStatsWorkerActive": True,
-        "poolStatsBestDifficultyBefore": 0.0,
-        "poolStatsBestDifficultyAfter": 0.05,
-        "localDiffSatisfiedByAcceptance": True,
-        "provenLocalDiffLowerBound": 0.0001,
-        "virtualAsicWorkers": [{"asicNr": 0, "jobsAssigned": 2}],
-    }
-    before_payload = {"sharesAccepted": 0, "sharesRejected": 0}
-    after_payload = {"sharesAccepted": 0, "sharesRejected": 0, "poolDifficulty": 0.0001}
-
-    summary = module.summarize_phase(
-        phase,
-        tmp_path,
-        tmp_path / "runtime" / "out",
-        tmp_path / "runtime" / "state",
-        wait_payload,
-        before_payload,
-        after_payload,
-        phase_error="",
-    )
-
-    assert summary["phaseStatus"] == "PASSED"
-    assert summary["acceptedShareProofSource"] == "pool_stats"
-    assert summary["acceptedShareDelta"] == 1
-    assert summary["poolStatsProofKind"] == "public_pool_bestdiff"
-    assert summary["poolStatsBestDifficultyAfter"] == 0.05
-    assert summary["poolStatsWorkerBound"] is True
-    assert summary["poolStatsAcceptedShareCounter"] is False
-    assert summary["poolStatsSupportsDelta"] is False
 
 
 def test_phase_can_use_source_native_qemu_accepted_response_for_acceptance(tmp_path: Path):
@@ -585,7 +519,7 @@ def test_phase_can_use_source_native_qemu_accepted_response_for_acceptance(tmp_p
 
 def test_qualification_summary_rejects_firmware_and_generic_qemu_without_pool_side_proof(tmp_path: Path):
     module = load_module()
-    phase = dict(module.phases_for_mode("qualification")[2])
+    phase = dict(module.phases_for_mode("qualification")[1])
     wait_payload = {
         "durationSeconds": 0.0,
         "poolDifficulty": 0.001,
@@ -638,7 +572,7 @@ def test_qualification_summary_accepts_direct_pool_stratum_response(tmp_path: Pa
         "qemuWorkerIdentity": True,
         "qemuSubmitSeen": True,
         "qemuAcceptedShare": True,
-        "poolStatsProofKind": "public_pool_bestdiff",
+        "poolStatsProofKind": "bitronics_status_evidence",
         "poolStatsAcceptedShareDelta": 0.0,
         "poolStatsAccepted": False,
     }
@@ -666,7 +600,7 @@ def test_qualification_summary_accepts_direct_pool_stratum_response(tmp_path: Pa
 
 def test_qualification_summary_accepts_pool_stats_even_without_local_or_qemu(tmp_path: Path):
     module = load_module()
-    phase = dict(module.phases_for_mode("qualification")[2])
+    phase = dict(module.phases_for_mode("qualification")[1])
     wait_payload = {
         "durationSeconds": 0.0,
         "poolDifficulty": 0.001,
@@ -697,7 +631,7 @@ def test_qualification_summary_accepts_pool_stats_even_without_local_or_qemu(tmp
 
 def test_nerdminers_qualification_wait_command_requires_pool_stats_delta(monkeypatch):
     module = load_module()
-    phase = dict(module.phases_for_mode("qualification")[2])
+    phase = dict(module.phases_for_mode("qualification")[1])
     captured = {}
 
     def stub_run_command(command, **kwargs):
@@ -736,7 +670,7 @@ def test_nerdminers_qualification_wait_command_requires_pool_stats_delta(monkeyp
 
 def test_smoke_wait_command_does_not_require_pool_stats_delta(monkeypatch):
     module = load_module()
-    phase = dict(module.phases_for_mode("smoke")[2])
+    phase = dict(module.phases_for_mode("smoke")[1])
     captured = {}
 
     def stub_run_command(command, **kwargs):
@@ -762,7 +696,7 @@ def test_smoke_wait_command_does_not_require_pool_stats_delta(monkeypatch):
     assert "--pool-stats-min-delta" not in captured["command"]
 
 
-def test_non_capable_stats_pool_still_runs_wait_helper_for_protocol_proof(monkeypatch):
+def test_bitronics_qualification_still_runs_wait_helper_for_protocol_proof(monkeypatch):
     module = load_module()
     phase = dict(module.phases_for_mode("qualification")[0])
     captured = {}
@@ -781,25 +715,26 @@ def test_non_capable_stats_pool_still_runs_wait_helper_for_protocol_proof(monkey
         Path("/tmp/qemu.log"),
         0,
         "bitaxe",
-        "https://public-pool.io:40557/api/client/bc1ptest",
-        "https://public-pool.io:40557/api/client/bc1ptest/vagpubrtest",
-        "bc1ptest.vagpubrtest",
+        "https://pool.bitronics.store/api/stats/bc1ptest",
+        "https://pool.bitronics.store/stats/bc1ptest",
+        "bc1ptest.vagbitrtest",
         0.0,
-        0.01,
+        None,
+        "2026-04-30T20:00:00.000Z",
     )
 
     command = captured["command"]
     assert "--pool-stats-kind" in command
-    assert "public_pool_bestdiff" in command
+    assert "bitronics_status_evidence" in command
     assert "--pool-stats-min-delta" in command
     assert command[command.index("--pool-stats-min-delta") + 1] == "5"
     assert "--expected-pool-worker" in command
-    assert "bc1ptest.vagpubrtest" in command
+    assert "bc1ptest.vagbitrtest" in command
 
 
 def test_bitronics_wait_command_uses_pool_stats_page_and_auth(monkeypatch):
     module = load_module()
-    phase = dict(module.phases_for_mode("smoke")[1])
+    phase = dict(module.phases_for_mode("smoke")[0])
     captured = {}
 
     def stub_run_command(command, **kwargs):
@@ -832,43 +767,6 @@ def test_bitronics_wait_command_uses_pool_stats_page_and_auth(monkeypatch):
     assert "--pool-stats-page-url" in command
     assert "https://pool.bitronics.store/stats/bc1ptest" in command
     assert "--pool-stats-baseline-last-share" in command
-
-
-def test_public_pool_wait_command_uses_worker_stats_endpoint(monkeypatch):
-    module = load_module()
-    phase = dict(module.phases_for_mode("smoke")[0])
-    captured = {}
-
-    def stub_run_command(command, **kwargs):
-        captured["command"] = command
-        return module.subprocess.CompletedProcess(command, 0, "{}", "")
-
-    monkeypatch.setattr(module, "run_command", stub_run_command)
-
-    module.run_wait_for_phase(
-        "http://127.0.0.1:18080",
-        phase,
-        0,
-        0,
-        Path("/tmp/qemu.log"),
-        0,
-        "bitaxe",
-        "https://public-pool.io:40557/api/client/bc1ptest",
-        "https://public-pool.io:40557/api/client/bc1ptest/vagpubrtest",
-        "bc1ptest.vagpubrtest",
-        0.0,
-        0.01,
-    )
-
-    command = captured["command"]
-    assert "--pool-stats-kind" in command
-    assert "public_pool_bestdiff" in command
-    assert "--pool-stats-page-url" in command
-    assert "https://public-pool.io:40557/api/client/bc1ptest/vagpubrtest" in command
-    expected_worker_index = command.index("--expected-pool-worker")
-    assert command[expected_worker_index + 1] == "bc1ptest.vagpubrtest"
-    assert "--pool-stats-baseline-best-difficulty" in command
-    assert "0.01" in command
 
 
 def test_nerdnos_wait_command_does_not_require_bitaxe_virtual_worker_fields(monkeypatch):

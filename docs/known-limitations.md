@@ -14,7 +14,11 @@
 
 `verify-release` is the acceptance surface for remote pools. Smoke mode is the
 default short gate. Qualification mode is the explicit release-prep gate for
-collecting repeated pool-side accepted-share proof.
+collecting repeated pool-side accepted-share proof. The gate uses Bitronics and
+Nerdminers, whose current low-difficulty behavior is compatible with the
+guest-side virtual ASIC. PublicPool remains an optional runtime preset, but its
+public instances are not release quality gates because their deployment policy
+can change independently of this repository.
 
 ## Toolchain Reproducibility
 

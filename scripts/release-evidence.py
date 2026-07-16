@@ -20,7 +20,7 @@ from source_registry import load_source_registry
 
 SOURCES_FILE = ROOT_DIR / "configs" / "sources.json"
 DEFAULT_OUT_DIR = ROOT_DIR / "out" / "release-evidence"
-DEFAULT_REQUIRED_POOLS = ["PublicPool", "Bitronics", "Nerdminers"]
+DEFAULT_REQUIRED_POOLS = ["Bitronics", "Nerdminers"]
 ACCEPTED_PROOF_SOURCES = {
     "firmware_api": "diagnostic firmware/API accepted-share evidence",
     "pool_stratum_response": "direct remote pool Stratum accepted-response proof",

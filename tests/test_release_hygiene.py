@@ -38,7 +38,7 @@ EXPECTED_PATCH_KEEP_REASONS = {
     "0045-virtual-align-guest-digest-path-with-software-validator.patch": "Keeps the fast digest filter aligned with the validator while preserving rolled-version submit behavior.",
     "0046-virtual-guard-submit-boundary-with-work-generations.patch": "Stops clean-jobs-invalidated work from reaching submit after a candidate is found.",
     "0047-virtual-api-keep-settings-updates-responsive.patch": "Prevents repeated AxeOS settings writes from stalling the API while preserving persisted values.",
-    "0048-virtual-pool-support-low-difficulty-interoperability.patch": "Makes the virtual miner interoperate with the low-difficulty public pools used for release evidence.",
+    "0048-virtual-pool-support-low-difficulty-interoperability.patch": "Makes the virtual miner interoperate with supported low-difficulty pools.",
 }
 EXPECTED_NERDNOS_PATCH_KEEP_REASONS = {
     "0001-nerdnos-add-virtual-gamma-api-boot-path.patch": "Required to boot the NerdNos fork as virtual Gamma in ESP32-S3 QEMU.",
@@ -651,13 +651,16 @@ def test_readme_documents_firmware_source_selection_without_overclaiming():
     assert "does not claim full NerdNos feature parity" in readme
     assert "deterministic submit replay" in readme
     assert "five pool-side accepted shares per pool" in readme
+    assert "automated live gate targets Bitronics and Nerdminers" in readme
+    assert "PublicPool remains an\noptional runtime preset" in readme
+    assert "public instances are not release quality gates" in readme
     assert "direct remote\npool Stratum accepted response" in readme
     assert "Firmware/API counters, best-difficulty charts, worker-active status, screenshots,\nand generic QEMU log activity are diagnostics only" in readme
     assert re.search(r"QEMU logs are accepted only\s+as the transport for validated live pool Stratum responses", readme)
     assert "live mining\nis not verified for that source" not in upstream
     assert re.search(r"live pool\s+qualification evidence", upstream)
-    assert "status evidence remain diagnostic because they are not accepted-share counters" in upstream
-    assert "requires PublicPool, Bitronics, and Nerdminers to\npass in the same run" in patch_stack
+    assert "status evidence remains diagnostic because it is\nnot an accepted-share counter" in upstream
+    assert "requires Bitronics and Nerdminers to pass in the\nsame run" in patch_stack
     assert "five validated remote-pool Stratum accepted responses\nper pool" in patch_stack
 
 
@@ -691,7 +694,9 @@ def test_public_docs_distinguish_local_live_and_release_gates():
     command_contract = (ROOT_DIR / "docs" / "command-contract.md").read_text(encoding="utf-8")
 
     assert "docs/command-contract.md" in readme
-    assert "automated live PublicPool, Bitronics, and Nerdminers smoke gate" in command_contract
+    assert "automated live Bitronics and Nerdminers smoke gate" in command_contract
+    assert "PublicPool remains available through `./vaxe --pool public`" in command_contract
+    assert "not a release quality gate" in command_contract
     assert "Each pool phase exits when its accepted-share proof requirement is met" in command_contract
     assert "requires five pool-side accepted shares and zero rejected-share delta violation" in command_contract
     assert "Pool-side proof means direct remote-pool Stratum accepted responses" in command_contract
@@ -709,7 +714,8 @@ def test_readme_preserves_release_proof_semantics():
     assert "Firmware/API counters, best-difficulty charts, worker-active status, screenshots,\nand generic QEMU log activity are diagnostics only" in readme
     assert "Pool-side proof can come from a direct remote\npool Stratum accepted response" in readme
     assert "Firmware/API counters, best-difficulty/chart data, worker-active status, and generic QEMU logs are diagnostic only" in command_contract
-    assert "PublicPool best-difficulty/chart evidence and Bitronics\nstatus evidence remain diagnostic" in upstream
+    assert "Bitronics status evidence remains diagnostic" in upstream
+    assert "PublicPool is an optional interoperability target" in upstream
     assert "five pool-side accepted shares" in architecture
     assert "do\nnot satisfy qualification thresholds" in architecture
 

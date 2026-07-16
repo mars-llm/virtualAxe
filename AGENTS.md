@@ -64,6 +64,9 @@ NerdNos integration, or source-agnostic runtime behavior. Use
 and local state. An upstream-head patch failure is maintenance drift unless the
 configured pin also fails.
 
+The automated live release gate requires Bitronics and Nerdminers. PublicPool
+remains an optional interoperability preset, not a release quality gate.
+
 Command safety classes are defined in `docs/command-contract.md`:
 
 - Read-only checks inspect tracked source or existing state.

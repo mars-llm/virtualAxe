@@ -32,7 +32,7 @@ not part of that source's release stack.
 | `0045-virtual-align-guest-digest-path-with-software-validator.patch` | Keeps the fast digest filter aligned with the validator while preserving rolled-version submit behavior. | Aligns guest digest filtering with the software validator while preserving submit-time version-bit handling. |
 | `0046-virtual-guard-submit-boundary-with-work-generations.patch` | Stops clean-jobs-invalidated work from reaching submit after a candidate is found. | Adds immutable work descriptors, generation checks, and no-false-negative candidate filtering so clean jobs invalidate stale virtual submissions without slowing low-difficulty guest search. |
 | `0047-virtual-api-keep-settings-updates-responsive.patch` | Prevents repeated AxeOS settings writes from stalling the API while preserving persisted values. | Coalesces queued NVS settings writes so API updates stay responsive while preserving persisted values. |
-| `0048-virtual-pool-support-low-difficulty-interoperability.patch` | Makes the virtual miner interoperate with the low-difficulty public pools used for release evidence. | Adds virtual-scoped Stratum subscribe identity overrides, fractional suggested difficulty, low-difficulty Stratum timing, and submit-response recovery required by the blocking pool smoke gate. |
+| `0048-virtual-pool-support-low-difficulty-interoperability.patch` | Makes the virtual miner interoperate with supported low-difficulty pools. | Adds virtual-scoped Stratum subscribe identity overrides, fractional suggested difficulty, low-difficulty Stratum timing, and submit-response recovery required by the automated Bitronics and Nerdminers gate. |
 
 `0044` and `0045` remain separate by design. `0044` defines the canonical header
 material boundary; `0045` aligns the digest/validator path against that boundary.
@@ -61,7 +61,7 @@ its virtualAxe support uses a source-specific patch series under
 The patch stack itself proves clean source-specific apply behavior and supports
 the deterministic NerdNos build, QEMU API boot, and submit-replay gates. NerdNos
 live qualification evidence is recorded separately by release evidence. The
-current qualification standard requires PublicPool, Bitronics, and Nerdminers to
-pass in the same run with five validated remote-pool Stratum accepted responses
+current qualification standard requires Bitronics and Nerdminers to pass in the
+same run with five validated remote-pool Stratum accepted responses
 per pool and zero rejected-share delta. That evidence does not claim full
 NerdNos feature parity.

@@ -33,8 +33,10 @@ qualification evidence. Qualification requires
 pool-side accepted-share proof: either direct live Stratum accepted responses
 from the remote pool for current-phase submits, or worker-bound pool stats
 accepted-share counters when those counters are available. Firmware/API counters
-are diagnostic only. PublicPool best-difficulty/chart evidence and Bitronics
-status evidence remain diagnostic because they are not accepted-share counters.
+are diagnostic only. Bitronics status evidence remains diagnostic because it is
+not an accepted-share counter. PublicPool is an optional interoperability target,
+not a release quality gate, because its public deployment policy can change
+independently of the configured source pin.
 The upstream drift check
 `make patch-check-upstream` performs the same check against
 `origin/master` after a fetch. It is an upstream-risk signal only; it does not

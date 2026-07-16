@@ -38,8 +38,8 @@ Rolled-version bits are converted to submit-time `version_bits` only at the
 submit boundary.
 
 `verify-release` is the remote-pool integration gate for the virtual submit path.
-It runs `gamma` against PublicPool, Bitronics, and Nerdminers. Smoke mode is short
-and defaults to one accepted share per pool. Qualification mode is explicit and
+It runs `gamma` against Bitronics and Nerdminers. Smoke mode is short and
+defaults to one accepted share per pool. Qualification mode is explicit and
 requires five pool-side accepted shares per pool in the same run. Qualification
 can use direct live Stratum accepted responses from the
 remote pool or delayed worker-bound pool stats accepted-share counters when a
@@ -47,3 +47,7 @@ pool exposes them. Firmware/API counters, best-difficulty/chart data,
 worker-active status, and generic QEMU logs remain diagnostic evidence; they do
 not satisfy qualification thresholds unless the log entry is validated as a real
 remote-pool accepted response to a current-phase `mining.submit`.
+
+PublicPool remains an optional launcher preset and interoperability target. Its
+public deployment policy can change assigned difficulty independently of this
+repository, so it is not part of the release quality gate.
