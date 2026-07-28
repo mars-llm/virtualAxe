@@ -1,8 +1,8 @@
 # virtualAxe Agent Guide
 
 This file is the repository contract for coding and operations agents. Read it
-with `README.md`, `docs/architecture.md`, and `docs/command-contract.md` before
-changing source or running mutating commands.
+with `README.md` and `docs/command-contract.md` before changing source or
+running mutating commands.
 
 ## Project Boundary
 
@@ -47,6 +47,18 @@ series, and runs a virtual Bitaxe Gamma in ESP32-S3 QEMU.
 generated `out/` contents are disposable local state, not source of truth. Run
 `make local-state-report` before trusting existing local outputs. Keep private
 scratch notes and follow-ups in ignored `.state/todo_local.md`.
+
+## Code Navigation
+
+- `vaxe` loads `scripts/vaxe.py`, the human operator workflow.
+- `scripts/virtualaxe.py` owns developer commands, source preparation, build
+  manifests, verification, and state operations.
+- `scripts/source_registry.py` is the typed view of `configs/sources.json`.
+- `scripts/build-virtual.sh` builds firmware; `scripts/run-qemu-nat.sh` owns the
+  QEMU runtime lifecycle.
+- `tests/test_vaxe.py` covers launcher and developer CLI behavior.
+- `tests/api/` and `tests/browser/` define source-specific firmware/API/UI
+  guarantees.
 
 ## Operating Contract
 

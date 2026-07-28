@@ -103,6 +103,12 @@ REMOVED_PUBLIC_SURFACES = {
     "upstream/ESP-Miner",
 }
 
+REMOVED_CODE_EXPLAINER_DOCS = {
+    "docs/architecture.md",
+    "docs/debugging.md",
+    "docs/upstream-integration.md",
+}
+
 
 def removed_private_process_docs() -> set[str]:
     return {
@@ -320,7 +326,11 @@ def test_nerdnos_header_branding_patch_keeps_source_logo_with_virtual_label():
 
 def tracked_files() -> set[str]:
     result = subprocess.run(["git", "ls-files"], cwd=ROOT_DIR, text=True, capture_output=True, check=True)
-    return set(result.stdout.splitlines())
+    return {
+        relative
+        for relative in result.stdout.splitlines()
+        if (ROOT_DIR / relative).exists()
+    }
 
 
 def png_dimensions(path: Path) -> tuple[int, int]:
@@ -352,15 +362,28 @@ def test_public_repo_does_not_track_local_process_docs_or_upstream_source():
     files = tracked_files()
 
     assert files.isdisjoint(REMOVED_PUBLIC_SURFACES)
+    assert files.isdisjoint(REMOVED_CODE_EXPLAINER_DOCS)
     assert files.isdisjoint(removed_private_process_docs())
     assert "AGENTS.md" in files
     assert not any(path.startswith("upstream/") for path in files)
     assert not (ROOT_DIR / "reference").exists()
 
 
+def test_public_docs_are_limited_to_contracts_rationale_and_domain_boundaries():
+    docs = {
+        str(path.relative_to(ROOT_DIR))
+        for path in (ROOT_DIR / "docs").glob("*.md")
+    }
+
+    assert docs == {
+        "docs/command-contract.md",
+        "docs/known-limitations.md",
+        "docs/patch-stack.md",
+    }
+
+
 def test_public_source_docs_match_current_schema():
     readme = (ROOT_DIR / "README.md").read_text(encoding="utf-8")
-    upstream_doc = (ROOT_DIR / "docs" / "upstream-integration.md").read_text(encoding="utf-8")
     command_contract = (ROOT_DIR / "docs" / "command-contract.md").read_text(encoding="utf-8")
     sources = json.loads((ROOT_DIR / "configs" / "sources.json").read_text(encoding="utf-8"))
     profile = json.loads((ROOT_DIR / "configs" / "profiles" / "gamma.json").read_text(encoding="utf-8"))
@@ -379,7 +402,6 @@ def test_public_source_docs_match_current_schema():
         f"`v1.0.37` / `{nerdnos['resolvedCommit']}` | `{profile['id']}` |"
     ) in readme
     assert "SOURCE_NAME=vanilla" not in readme
-    assert "SOURCE_NAME=vanilla" not in upstream_doc
     assert '"repo":' not in readme
     assert '"name": "gamma"' not in readme
     assert "make build SOURCE=bitaxe" in readme
@@ -510,7 +532,6 @@ def test_python_dependencies_are_locked():
 def test_patch_drift_commands_are_public_and_documented():
     makefile = (ROOT_DIR / "Makefile").read_text(encoding="utf-8")
     command_contract = (ROOT_DIR / "docs" / "command-contract.md").read_text(encoding="utf-8")
-    upstream_doc = (ROOT_DIR / "docs" / "upstream-integration.md").read_text(encoding="utf-8")
     cli = (ROOT_DIR / "scripts" / "virtualaxe.py").read_text(encoding="utf-8")
 
     assert "patch-check:" in makefile
@@ -519,7 +540,7 @@ def test_patch_drift_commands_are_public_and_documented():
     assert "/tmp/virtualaxe-patchcheck-upstream-$(SOURCE)" in makefile
     assert 'add_parser("patch-check"' in cli
     assert "make patch-check" in command_contract
-    assert "make patch-check-upstream" in upstream_doc
+    assert "make patch-check-upstream" in command_contract
 
 
 def test_patch_apply_does_not_copy_frontend_dependency_cache():
@@ -657,7 +678,6 @@ def test_readme_is_human_focused_github_landing_page():
 def test_readme_documents_firmware_source_selection_without_overclaiming():
     readme = (ROOT_DIR / "README.md").read_text(encoding="utf-8")
     command_contract = (ROOT_DIR / "docs" / "command-contract.md").read_text(encoding="utf-8")
-    upstream = (ROOT_DIR / "docs" / "upstream-integration.md").read_text(encoding="utf-8")
     patch_stack = (ROOT_DIR / "docs" / "patch-stack.md").read_text(encoding="utf-8")
 
     assert "`bitaxe`" in readme
@@ -678,9 +698,7 @@ def test_readme_documents_firmware_source_selection_without_overclaiming():
     assert "direct remote\npool Stratum accepted response" in readme
     assert "Firmware/API counters, best-difficulty charts, worker-active status, screenshots,\nand generic QEMU log activity are diagnostics only" in readme
     assert re.search(r"QEMU logs are accepted only\s+as the transport for validated live pool Stratum responses", readme)
-    assert "live mining\nis not verified for that source" not in upstream
-    assert re.search(r"live pool\s+qualification evidence", upstream)
-    assert "status evidence remains diagnostic because it is\nnot an accepted-share counter" in upstream
+    assert "Firmware/API counters, best-difficulty/chart data, worker-active status, and generic QEMU logs are diagnostic only" in command_contract
     assert "requires Bitronics and Nerdminers to pass in the\nsame run" in patch_stack
     assert "five validated remote-pool Stratum accepted responses\nper pool" in patch_stack
 
@@ -727,18 +745,14 @@ def test_public_docs_distinguish_local_live_and_release_gates():
 
 def test_readme_preserves_release_proof_semantics():
     readme = (ROOT_DIR / "README.md").read_text(encoding="utf-8")
-    architecture = (ROOT_DIR / "docs" / "architecture.md").read_text(encoding="utf-8")
     command_contract = (ROOT_DIR / "docs" / "command-contract.md").read_text(encoding="utf-8")
-    upstream = (ROOT_DIR / "docs" / "upstream-integration.md").read_text(encoding="utf-8")
 
     assert "Release evidence distinguishes firmware/API accepted-share evidence" not in readme
     assert "Firmware/API counters, best-difficulty charts, worker-active status, screenshots,\nand generic QEMU log activity are diagnostics only" in readme
     assert "Pool-side proof can come from a direct remote\npool Stratum accepted response" in readme
     assert "Firmware/API counters, best-difficulty/chart data, worker-active status, and generic QEMU logs are diagnostic only" in command_contract
-    assert "Bitronics status evidence remains diagnostic" in upstream
-    assert "PublicPool is an optional interoperability target" in upstream
-    assert "five pool-side accepted shares" in architecture
-    assert "do\nnot satisfy qualification thresholds" in architecture
+    assert "requires five pool-side accepted shares and zero rejected-share delta violation" in command_contract
+    assert "PublicPool remains available through `./vaxe --pool public`" in command_contract
 
 
 def test_command_safety_docs_use_precise_side_effect_classes():

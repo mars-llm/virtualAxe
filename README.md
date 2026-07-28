@@ -11,8 +11,6 @@
   ·
   <a href="docs/command-contract.md">Commands</a>
   ·
-  <a href="docs/architecture.md">Architecture</a>
-  ·
   <a href="AGENTS.md">Agent Guide</a>
   ·
   <a href="LICENSE">MIT License</a>
@@ -226,12 +224,7 @@ are [MIT licensed](LICENSE).
   coding agents
 - [`docs/command-contract.md`](docs/command-contract.md) - command side effects
   and release gates
-- [`docs/architecture.md`](docs/architecture.md) - runtime architecture and
-  evidence boundaries
 - [`docs/patch-stack.md`](docs/patch-stack.md) - active patch list, keep reasons,
   and verification methods
-- [`docs/upstream-integration.md`](docs/upstream-integration.md) - source pins,
-  patch-check, and drift workflow
-- [`docs/debugging.md`](docs/debugging.md) - local debugging notes
 - [`docs/known-limitations.md`](docs/known-limitations.md) - platform and
   validation limits

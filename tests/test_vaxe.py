@@ -62,9 +62,13 @@ def test_vaxe_without_arguments_prints_help_without_starting(monkeypatch: pytest
 
     output = capsys.readouterr().out
     assert "usage: vaxe" in output
-    assert "Start a source-specific virtualAxe operator session." in output
+    assert "Run real source-specific firmware and AxeOS in ESP32-S3 QEMU." in output
     assert "./vaxe --source bitaxe" in output
     assert "./vaxe --source nerdnos --pool bitronics" in output
+    assert "./vaxe --source bitaxe --status" in output
+    assert "make build SOURCE=bitaxe" in output
+    assert "make verify-submit-replay SOURCE=bitaxe" in output
+    assert "Build and runtime failures print the relevant log path." in output
     assert "Bare ./vaxe prints this help and does not start QEMU." in output
 
 

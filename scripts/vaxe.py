@@ -111,11 +111,19 @@ def build_parser() -> argparse.ArgumentParser:
     public_sources = tuple(sorted(registry.sources))
     parser = argparse.ArgumentParser(
         prog="vaxe",
-        description="Start a source-specific virtualAxe operator session.",
+        description="Run real source-specific firmware and AxeOS in ESP32-S3 QEMU.",
         epilog=(
-            "Examples:\n"
+            "Operator sessions:\n"
             "  ./vaxe --source bitaxe\n"
-            "  ./vaxe --source nerdnos --pool bitronics\n\n"
+            "  ./vaxe --source nerdnos --pool bitronics\n"
+            "  ./vaxe --source bitaxe --sim-actions\n\n"
+            "Inspect without changing state:\n"
+            "  ./vaxe --source bitaxe --status\n"
+            "  ./vaxe --source bitaxe --status --json\n\n"
+            "Build and verify without opening the dashboard:\n"
+            "  make build SOURCE=bitaxe\n"
+            "  make verify-submit-replay SOURCE=bitaxe\n\n"
+            "Build and runtime failures print the relevant log path.\n"
             "Bare ./vaxe prints this help and does not start QEMU."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -616,36 +624,12 @@ def stop_simulation_proxy(process: subprocess.Popen | None) -> None:
         handle.close()
 
 
-def main(argv: list[str] | None = None) -> int:
-    if argv is None:
-        argv = sys.argv[1:]
-    if not argv:
-        build_parser().print_help()
-        return 0
-    args = parse_args(argv)
-    virtualaxe = load_virtualaxe_module()
-    source_name = args.source
-    virtualaxe.require_source_support(source_name, "api_boot_verified", "vaxe")
-    profile = virtualaxe.load_profile(args.profile)
-    if args.status:
-        print_status(
-            status_payload(
-                virtualaxe,
-                source_name=source_name,
-                profile=profile,
-                sim_backend_port=args.sim_backend_port,
-            ),
-            as_json=args.json,
-        )
-        return 0
-    sources = virtualaxe.load_sources()
-    source_dir, resolved_entry = virtualaxe.ensure_git_source(source_name, sources["sources"][source_name])
-    probe = virtualaxe.source_probe(source_dir)
-    virtualaxe.require_shared_virtual_patch_support(source_name, probe)
-    worktree = virtualaxe.prepare_worktree(source_name, source_dir, resolved_entry)
-    firmware_http_port, web_http_port = runtime_ports(args)
-
-    build_args = argparse.Namespace(
+def default_build_args(
+    *,
+    virtualaxe: ModuleType,
+    firmware_http_port: str,
+) -> argparse.Namespace:
+    return argparse.Namespace(
         out_dir=None,
         state_dir=None,
         json=False,
@@ -661,56 +645,156 @@ def main(argv: list[str] | None = None) -> int:
         http_port=int(firmware_http_port),
         reset_persisted_state=False,
     )
-    env = virtualaxe.build_env(build_args, source_name, worktree, profile)
-    env["HTTP_PORT"] = firmware_http_port
-    env["BASE_URL"] = f"http://127.0.0.1:{env['HTTP_PORT']}"
-    env["VIRTUALAXE_DISABLE_TEE"] = "1"
-    env["WEB_HTTP_PORT"] = web_http_port
-    env["SIM_ACTIONS_ENABLED"] = "1" if args.sim_actions else "0"
 
+
+def prepare_patched_firmware_environment(
+    args: argparse.Namespace,
+    *,
+    virtualaxe: ModuleType,
+    profile: dict[str, Any],
+) -> tuple[argparse.Namespace, dict[str, str]]:
+    sources = virtualaxe.load_sources()
+    source_entry = sources["sources"][args.source]
+    source_dir, resolved_entry = virtualaxe.ensure_git_source(args.source, source_entry)
+    source_capabilities = virtualaxe.source_probe(source_dir)
+    virtualaxe.require_shared_virtual_patch_support(args.source, source_capabilities)
+    patched_worktree = virtualaxe.prepare_worktree(args.source, source_dir, resolved_entry)
+
+    firmware_http_port, web_http_port = runtime_ports(args)
+    build_args = default_build_args(
+        virtualaxe=virtualaxe,
+        firmware_http_port=firmware_http_port,
+    )
+    env = virtualaxe.build_env(build_args, args.source, patched_worktree, profile)
+    env.update(
+        {
+            "HTTP_PORT": firmware_http_port,
+            "BASE_URL": f"http://127.0.0.1:{firmware_http_port}",
+            "VIRTUALAXE_DISABLE_TEE": "1",
+            "WEB_HTTP_PORT": web_http_port,
+            "SIM_ACTIONS_ENABLED": "1" if args.sim_actions else "0",
+        }
+    )
+    return build_args, env
+
+
+def ensure_reusable_image_and_runtime(
+    *,
+    virtualaxe: ModuleType,
+    source_name: str,
+    profile_id: str,
+    build_args: argparse.Namespace,
+    env: dict[str, str],
+) -> None:
     out_dir = Path(env["OUT_DIR"])
     flash_file = out_dir / "qemu_flash.bin"
-    build_matches = (
+    image_matches_request = (
         flash_file.is_file()
-        and virtualaxe.manifest_matches_requested_build(out_dir / "manifest.json", env, source_name, profile["id"])
+        and virtualaxe.manifest_matches_requested_build(
+            out_dir / "manifest.json",
+            env,
+            source_name,
+            profile_id,
+        )
         and not virtualaxe.build_inputs_newer_than_flash(flash_file)
     )
-    active_runtime = runtime_is_active(env.get("QEMU_CONTAINER_NAME", "virtualaxe-qemu"), out_dir)
 
-    if active_runtime and not build_matches:
+    if runtime_is_active(env.get("QEMU_CONTAINER_NAME", "virtualaxe-qemu"), out_dir) and not image_matches_request:
         stop_runtime(env)
-        active_runtime = False
 
-    if not build_matches:
+    if not image_matches_request:
         build_result = virtualaxe.ensure_matching_build(
             build_args,
             env,
             source_name=source_name,
-            profile_id=profile["id"],
+            profile_id=profile_id,
             capture=False,
         )
         if build_result is not None and build_result.returncode != 0:
-            raise SystemExit("Unable to build virtualAxe. See out/build.log.")
+            raise SystemExit(f"Unable to build virtualAxe. See {out_dir / 'build.log'}.")
 
-    stop_conflicting_runtimes(env, virtualaxe=virtualaxe, profile_id=profile["id"])
+    stop_conflicting_runtimes(env, virtualaxe=virtualaxe, profile_id=profile_id)
     ensure_runtime_available(env)
 
+
+def apply_pool_settings_through_firmware_api(env: dict[str, str], target: PoolTarget) -> None:
+    system_url = f"{env['BASE_URL']}/api/system"
+    current_settings = fetch_json(f"{system_url}/info")
+    if not pool_override_differs(current_settings, target):
+        return
+
+    patch_json(system_url, pool_patch_payload(target))
+    post_empty(f"{system_url}/restart")
+    wait_for_http(env)
+
+
+def run_status_command(
+    args: argparse.Namespace,
+    *,
+    virtualaxe: ModuleType,
+    profile: dict[str, Any],
+) -> int:
+    print_status(
+        status_payload(
+            virtualaxe,
+            source_name=args.source,
+            profile=profile,
+            sim_backend_port=args.sim_backend_port,
+        ),
+        as_json=args.json,
+    )
+    return 0
+
+
+def run_operator_session(
+    args: argparse.Namespace,
+    *,
+    virtualaxe: ModuleType,
+    profile: dict[str, Any],
+) -> int:
+    build_args, env = prepare_patched_firmware_environment(
+        args,
+        virtualaxe=virtualaxe,
+        profile=profile,
+    )
+    ensure_reusable_image_and_runtime(
+        virtualaxe=virtualaxe,
+        source_name=args.source,
+        profile_id=profile["id"],
+        build_args=build_args,
+        env=env,
+    )
+
     if args.pool is not None:
-        info_url = f"{env['BASE_URL']}/api/system/info"
-        system_url = f"{env['BASE_URL']}/api/system"
-        system_info = fetch_json(info_url)
-        if pool_override_differs(system_info, args.pool):
-            patch_json(system_url, pool_patch_payload(args.pool))
-            post_empty(f"{system_url}/restart")
-            wait_for_http(env)
+        apply_pool_settings_through_firmware_api(env, args.pool)
 
     proxy: subprocess.Popen | None = None
     try:
         if args.sim_actions:
             proxy = start_simulation_proxy(env)
-        return launch_dashboard(source_name=source_name, profile_name=profile["id"], env=env)
+        return launch_dashboard(
+            source_name=args.source,
+            profile_name=profile["id"],
+            env=env,
+        )
     finally:
         stop_simulation_proxy(proxy)
+
+
+def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv:
+        build_parser().print_help()
+        return 0
+    args = parse_args(argv)
+    virtualaxe = load_virtualaxe_module()
+    source_name = args.source
+    virtualaxe.require_source_support(source_name, "api_boot_verified", "vaxe")
+    profile = virtualaxe.load_profile(args.profile)
+    if args.status:
+        return run_status_command(args, virtualaxe=virtualaxe, profile=profile)
+    return run_operator_session(args, virtualaxe=virtualaxe, profile=profile)
 
 
 if __name__ == "__main__":
